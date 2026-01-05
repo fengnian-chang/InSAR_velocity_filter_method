@@ -1,0 +1,10 @@
+This package provides four filtering methods for InSAR velocity fields: bilateral, Gaussian, median, and LOESS (currently a simplified version that fits a low-order polynomial within a moving window). The calling syntax for each method follows the corresponding function or the examples provided here.
+
+Users can directly run filter_comparison_synthetic_profile.m to compare the performance of different methods on synthetic data. The parameters include the slip rate of an infinitely long strike-slip screw dislocation, locking depth, shallow creep rate, shallow creep depth, and noise (Gaussian white noise and spatially correlated noise).
+
+For real data, refer to filter_comparison_AHB.m to compare different methods. Only Ve.tif and Vn.tif are required. Note that the filtering methods here are pixel-based, and the choice of filtering parameters should be adjusted according to the resolution of the input velocity fields.
+
+Users are requested to cite the following paper:
+Chang, F., Hooper, A. J., Dong, S., Yin, H., Fang, J., & Elliott, J. R. (2025). A Refined Bilateral Filtering for Robust Strain-Rate Mapping from Geodetic Velocity Fields.
+
+For questions, please contact cfn@smail.nju.edu.cn or xhfk9298@leeds.ac.uk

@@ -9,6 +9,10 @@ function V_bilateral = bilateral_nanconv( ...
 %                                   center_mode, ...)
 %
 %   center_mode 选项：
+%     'mean'     - range 的中心值采用局部均值（窗口大小 = center_winsize）
+%                  调用示例：
+%                     bilateral_nanconv(V, ss, rs, sw, cw, 'mean', 'nanout')
+%
 %     'median'   - range 的中心值采用局部中值（窗口大小 = center_winsize）
 %                  调用示例：
 %                     bilateral_nanconv(V, ss, rs, sw, cw, 'median', 'nanout')
@@ -27,10 +31,10 @@ function V_bilateral = bilateral_nanconv( ...
 %     spatial_sigma   - Std of spatial Gaussian kernel (in px)
 %     range_sigma     - Std of range kernel (in data units, e.g. mm/yr)
 %     spatial_winsize - Window size for spatial kernel (odd number)
-%     center_winsize  - Window size for local center (median 或 Gaussian)
-%     center_mode     - 'median' or 'gaussian'
+%     center_winsize  - Window size for local center (median/mean/Gaussian)
+%     center_mode     - 'median', 'mean' or 'gaussian'
 %     varargin        - 对于 'gaussian'：第一个为 center_sigma，其余为 flags
-%                       对于 'median'：直接就是 flags
+%                       对于 'median'/'mean'：直接就是 flags
 %
 %   OUTPUT:
 %     V_bilateral     - Filtered result of same size as V
@@ -45,12 +49,12 @@ if strcmp(center_mode, 'gaussian')
     end
     center_sigma = varargin{1};
     flag_args    = varargin(2:end);
-elseif strcmp(center_mode, 'median')
-    % median 模式不需要 center_sigma
+elseif strcmp(center_mode, 'median') || strcmp(center_mode, 'mean')
+    % median / mean 模式不需要 center_sigma
     center_sigma = [];
     flag_args    = varargin;
 else
-    error('center_mode must be "median" or "gaussian".');
+    error('center_mode must be "median", "mean", or "gaussian".');
 end
 
 % ------------ 解析 flags: nanout / nonanout -------------
@@ -86,8 +90,8 @@ if strcmp(center_mode, 'gaussian')
     V_center = nanconv(V, center_kernel, 'edge', 'nanout');
 end
 
-% median 模式下的中心窗口半径
-if strcmp(center_mode, 'median')
+% median / mean 模式下的中心窗口半径
+if strcmp(center_mode, 'median') || strcmp(center_mode, 'mean')
     half_win_center = floor(center_winsize/2);
 end
 
@@ -124,18 +128,23 @@ for i = 1:m
                 end
             end
             
-        elseif strcmp(center_mode, 'median')
-            % 使用局部窗口的中值
+        elseif strcmp(center_mode, 'median') || strcmp(center_mode, 'mean')
+            % 使用局部窗口的中值或均值
             rr1 = max(i - half_win_center, 1);
             rr2 = min(i + half_win_center, m);
             cc1 = max(j - half_win_center, 1);
             cc2 = min(j + half_win_center, n);
             
-            median_patch = V(rr1:rr2, cc1:cc2);
-            median_valid = ~isnan(median_patch);
+            center_patch = V(rr1:rr2, cc1:cc2);
+            center_valid = ~isnan(center_patch);
             
-            if any(median_valid(:))
-                center_val = median(median_patch(median_valid));
+            if any(center_valid(:))
+                vals = center_patch(center_valid);
+                if strcmp(center_mode, 'median')
+                    center_val = median(vals);
+                else % 'mean'
+                    center_val = mean(vals);
+                end
             else
                 if nanout
                     V_bilateral(i,j) = NaN;

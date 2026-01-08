@@ -5,6 +5,6 @@ Users can directly run filter_comparison_synthetic_profile.m to compare the perf
 For real data, refer to filter_comparison_AHB.m to compare different methods. Only Ve.tif and Vn.tif are required. Note that the filtering methods here are pixel-based, and the choice of filtering parameters should be adjusted according to the resolution of the input velocity fields.
 
 Users are requested to cite the following paper:
-Chang, F., Hooper, A. J., Dong, S., Yin, H., Fang, J., & Elliott, J. R. (2025). A Refined Bilateral Filtering for Robust Strain-Rate Mapping from Geodetic Velocity Fields.
+Chang, F., Hooper, A. J., Dong, S., Yin, H., Fang, J., & Elliott, J. R. (2026). A Refined Bilateral Filtering for Robust Strain-Rate Mapping from Geodetic Velocity Fields.
 
 For questions, please contact cfn@smail.nju.edu.cn or xhfk9298@leeds.ac.uk

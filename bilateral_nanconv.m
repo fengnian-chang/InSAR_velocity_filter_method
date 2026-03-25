@@ -1,23 +1,23 @@
 function V_bilateral = bilateral_nanconv( ...
-    V, spatial_sigma, range_sigma, ...
+    V, spatial_sigma, value_sigma, ...
     spatial_winsize, center_winsize, ...
     center_mode, varargin)
 % BILATERAL_NANCONV  Bilateral filter that handles NaN values in the input.
 % 
-%   V_bilateral = bilateral_nanconv(V, spatial_sigma, range_sigma, ...
+%   V_bilateral = bilateral_nanconv(V, spatial_sigma, value_sigma, ...
 %                                   spatial_winsize, center_winsize, ...
 %                                   center_mode, ...)
 %
 %   center_mode 选项：
-%     'mean'     - range 的中心值采用局部均值（窗口大小 = center_winsize）
+%     'mean'     - value 的中心值采用局部均值（窗口大小 = center_winsize）
 %                  调用示例：
 %                     bilateral_nanconv(V, ss, rs, sw, cw, 'mean', 'nanout')
 %
-%     'median'   - range 的中心值采用局部中值（窗口大小 = center_winsize）
+%     'median'   - value 的中心值采用局部中值（窗口大小 = center_winsize）
 %                  调用示例：
 %                     bilateral_nanconv(V, ss, rs, sw, cw, 'median', 'nanout')
 %
-%     'gaussian' - range 的中心值采用事先 Gaussian 平滑后的 V_center(i,j)
+%     'gaussian' - value 的中心值采用事先 Gaussian 平滑后的 V_center(i,j)
 %                  Gaussian 核的窗口大小 = center_winsize，sigma = center_sigma
 %                  调用示例：
 %                     bilateral_nanconv(V, ss, rs, sw, cw, 'gaussian', center_sigma, 'nanout')
@@ -29,7 +29,7 @@ function V_bilateral = bilateral_nanconv( ...
 %   INPUTS:
 %     V               - Input 2D matrix with NaNs
 %     spatial_sigma   - Std of spatial Gaussian kernel (in px)
-%     range_sigma     - Std of range kernel (in data units, e.g. mm/yr)
+%     value_sigma     - Std of value kernel (in data units, e.g. mm/yr)
 %     spatial_winsize - Window size for spatial kernel (odd number)
 %     center_winsize  - Window size for local center (median/mean/Gaussian)
 %     center_mode     - 'median', 'mean' or 'gaussian'
@@ -113,7 +113,7 @@ for i = 1:m
             (r1 - i + half_win_spatial + 1):(r2 - i + half_win_spatial + 1), ...
             (c1 - j + half_win_spatial + 1):(c2 - j + half_win_spatial + 1) );
         
-        % === 2. 定义 range 的中心值 center_val ===
+        % === 2. 定义 value 的中心值 center_val ===
         if strcmp(center_mode, 'gaussian')
             % 直接取预先算好的 Gaussian 平滑场
             center_val = V_center(i,j);
@@ -156,12 +156,12 @@ for i = 1:m
             end
         end
         
-        % === 3. range 权重，相对 center_val ===
-        range_weight = zeros(size(local_patch));
-        range_weight(local_valid) = exp( -((local_patch(local_valid) - center_val).^2) / (2 * range_sigma^2) );
+        % === 3. value 权重，相对 center_val ===
+        value_weight = zeros(size(local_patch));
+        value_weight(local_valid) = exp( -((local_patch(local_valid) - center_val).^2) / (2 * value_sigma^2) );
         
-        % 总权重 = 空间核 * range 核，并对 NaN 置零
-        total_weight = sk .* range_weight;
+        % 总权重 = 空间核 * value 核，并对 NaN 置零
+        total_weight = sk .* value_weight;
         total_weight(~local_valid) = 0;
         
         denom = sum(total_weight(:));

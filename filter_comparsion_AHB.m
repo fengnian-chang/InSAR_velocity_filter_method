@@ -2,65 +2,61 @@ clear all
 %% READ IN GEOTIFFS
 [Vn_gnss, R_n] = readgeoraster('AHB/vn_AHB_final.tif','CoordinateSystemType','geographic');
 [Ve_insar, R_e] = readgeoraster('AHB/ve_AHB_final.tif','CoordinateSystemType','geographic');
-% 降采样至5km
-% gdalwarp -tr 0.05 0.05 -r average -srcnodata nan -dstnodata nan Tianshan_ref2-2_decomp0_vE.geo.tif ve_5km.tif 
 
 xcoords = linspace(R_e.LongitudeLimits(1),R_e.LongitudeLimits(2),R_e.RasterSize(2));
 ycoords = linspace(R_e.LatitudeLimits(2),R_e.LatitudeLimits(1),R_e.RasterSize(1));
 
-%% Filter (ignore Nan)
-% 滤波参数 (in px)
-spatial_sigma = 25;
-winsize = 200;
-% bilateral
-range_sigma = 3;
-center_winsize = 50;    % default 25
-%center_sigma = 1;
+%% Filter parameters (in px)
+spatial_sigma = 15;
+winsize = 91;
 
-% % 高斯滤波（nan-aware）
-% gauss_kernel = fspecial('gaussian', [winsize winsize], spatial_sigma);
-% V_gaussian = nanconv(Ve_insar, gauss_kernel, 'edge', 'nonanout');
-% 
-% % 中值滤波（nan-aware）
-% V_median1 = nanmedfilt2(Ve_insar, [winsize winsize], 'nonanout');
-% % V_median2 = nanmedfilt2(Ve_insar, winsize, 'nanout');
+% for bilateral
+value_sigma = 3;    % velocity threshold
 
-% % LOESS滤波（nan-aware）
-% V_loess = loess_nanfit2(V_noisy, winsize, 'nanout');
-% V_loess2 = loess_nanfit2(V_noisy, 21, 'nanout');
+% Local small window used to calculate the reference velocity
+center_winsize = 25;    % Generally good for center_winsize between 20 and 50
 
-% % 双边滤波（NaN-aware）
-V_bilateral = bilateral_nanconv(Ve_insar, spatial_sigma, range_sigma, winsize, center_winsize, 'median', 'nonanout');
-% V_bilateral2 = bilateral_nanconv(V_noisy, spatial_sigma, 10, winsize, 'nanout'); %(测试大的range_sigma,此时接近高斯)
+% center_sigma = 1;  % if use local gaussuan
 
+%% Different Filter method (Bilateral, Median, Gaussian, and LOESS)
+% Gaussian（nan-aware）
+gauss_kernel = fspecial('gaussian', [winsize winsize], spatial_sigma);
+V_gaussian = nanconv(Ve_insar, gauss_kernel, 'edge', 'nonanout');
+
+% Median（nan-aware）
+V_median = nanmedfilt2(Ve_insar, [winsize winsize], 'nonanout');
+
+% LOESS（nan-aware）
+% V_loess = loess_nanfit2_plane(V_noisy, winsize, 'nanout');
+
+% Bilateral（NaN-aware）
+V_bilateral = bilateral_nanconv(Ve_insar, spatial_sigma, value_sigma, winsize, center_winsize, 'median', 'nonanout');
 
 %% Calculate velocity gradients
+% GNSS velocity
 [dvndx,dvndy] = gradient(Vn_gnss);
-
-% [dvedx_gaussian,dvedy_gaussian] = gradient(V_gaussian);
-% [dvedx_median1,dvedy_median1] = gradient(V_median1);
-% [dvedx_median2,dvedy_median2] = gradient(V_median2);
+% InSAR velocity
+[dvedx_gaussian,dvedy_gaussian] = gradient(V_gaussian);
+[dvedx_median,dvedy_median] = gradient(V_median);
 [dvedx_bilateral,dvedy_bilateral] = gradient(V_bilateral);
 
-scaley = 1000/haversine(ycoords(1),xcoords(1),ycoords(2),xcoords(1));
+scaley = -1000/haversine(ycoords(1),xcoords(1),ycoords(2),xcoords(1));
 scalex = zeros(length(ycoords),1);
 for i = 1:length(ycoords)
-    scalex(i) = -1000/haversine(ycoords(i),xcoords(1),ycoords(i),xcoords(2));
+    scalex(i) = 1000/haversine(ycoords(i),xcoords(1),ycoords(i),xcoords(2));
 end
 
 s_dvndy = dvndy*scaley;
 s_dvndx = dvndx.*scalex;
 
-% s_dvedx_gaussian = dvedx_gaussian*scaley;
-% s_dvedy_gaussian = dvedy_gaussian.*scalex;
-% s_dvedx_median1 = dvedx_median1*scaley;
-% s_dvedy_median1 = dvedy_median1.*scalex;
-% s_dvedx_median2 = dvedx_median2*scaley;
-% s_dvedy_median2 = dvedy_median2.*scalex;
-s_dvedx_bilateral = dvedx_bilateral*scaley;
-s_dvedy_bilateral = dvedy_bilateral.*scalex;
+s_dvedx_gaussian = dvedx_gaussian.*scalex;
+s_dvedy_gaussian = dvedy_gaussian*scaley;
+s_dvedx_median = dvedx_median.*scalex;
+s_dvedy_median = dvedy_median*scaley;
+s_dvedx_bilateral = dvedx_bilateral.*scalex;
+s_dvedy_bilateral = dvedy_bilateral*scaley;
 
-% %% 读取 GMT 多段线文件并绘制
+%% Read the fault data and prepare to plot
 % gmt_file = 'fault/gem_active_faults.gmt';
 % 
 % fid = fopen(gmt_file,'r');
@@ -103,32 +99,25 @@ s_dvedy_bilateral = dvedy_bilateral.*scalex;
 % ymin = min(ycoords);
 % ymax = max(ycoords);
 
- %% Calculate and plot strain rate tensor components plus derived products
+%% Calculate and plot strain rate tensor components plus derived products
 Eyy = s_dvndy;
-% Exx_gaussian = s_dvedx_gaussian;
-% Exx_median1 = s_dvedx_median1;
-% Exx_median2 = s_dvedx_median2;
+Exx_gaussian = s_dvedx_gaussian;
+Exx_median = s_dvedx_median;
 Exx_bilateral = s_dvedx_bilateral;
-% Exy_gaussian = 1/2*(s_dvedy_gaussian+s_dvndx);
-% Exy_median1 = 1/2*(s_dvedy_median1+s_dvndx);
-% Exy_median2 = 1/2*(s_dvedy_median2+s_dvndx);
+Exy_gaussian = 1/2*(s_dvedy_gaussian+s_dvndx);
+Exy_median = 1/2*(s_dvedy_median+s_dvndx);
 Exy_bilateral = 1/2*(s_dvedy_bilateral+s_dvndx);
 
 % InSAR GNSS Combine
-% Evort_gaussian = s_dvndx - s_dvedy_gaussian ;  % vorticity
-% Edil_gaussian = Exx_gaussian + Eyy; % dilatation
-% Eshear_gaussian = sqrt(Exy_gaussian.^2 + (Exx_gaussian - Eyy).^2/4); % Max shearstrain rate
-% EII_gaussian = sqrt(Exx_gaussian.^2 + 2*Exy_gaussian.^2 +Eyy.^2); % 2nd Invariant strain rate 
-% 
-% Evort_median1 = s_dvndx - s_dvedy_median1 ;  % vorticity
-% Edil_median1 = Exx_median1 + Eyy; % dilatation
-% Eshear_median1 = sqrt(Exy_median1.^2 + (Exx_median1 - Eyy).^2/4); % Max shearstrain rate
-% EII_median1 = sqrt(Exx_median1.^2 + 2*Exy_median1.^2 +Eyy.^2); % 2nd Invariant strain rate 
+Evort_gaussian = s_dvndx - s_dvedy_gaussian ;  % vorticity
+Edil_gaussian = Exx_gaussian + Eyy; % dilatation
+Eshear_gaussian = sqrt(Exy_gaussian.^2 + (Exx_gaussian - Eyy).^2/4); % Max shearstrain rate
+EII_gaussian = sqrt(Exx_gaussian.^2 + 2*Exy_gaussian.^2 +Eyy.^2); % 2nd Invariant strain rate 
 
-% Evort_median2 = s_dvndx - s_dvedy_median2 ;  % vorticity
-% Edil_median2 = Exx_median2 + Eyy; % dilatation
-% Eshear_median2 = sqrt(Exy_median2.^2 + (Exx_median2 - Eyy).^2/4); % Max shearstrain rate
-% EII_median2 = sqrt(Exx_median2.^2 + 2*Exy_median2.^2 +Eyy.^2); % 2nd Invariant strain rate 
+Evort_median = s_dvndx - s_dvedy_median ;  % vorticity
+Edil_median = Exx_median + Eyy; % dilatation
+Eshear_median = sqrt(Exy_median.^2 + (Exx_median - Eyy).^2/4); % Max shearstrain rate
+EII_median = sqrt(Exx_median.^2 + 2*Exy_median.^2 +Eyy.^2); % 2nd Invariant strain rate 
 
 Evort_bilateral = s_dvndx - s_dvedy_bilateral ;  % vorticity
 Edil_bilateral = Exx_bilateral + Eyy; % dilatation
@@ -136,34 +125,34 @@ Eshear_bilateral = sqrt(Exy_bilateral.^2 + (Exx_bilateral - Eyy).^2/4); % Max sh
 EII_bilateral = sqrt(Exx_bilateral.^2 + 2*Exy_bilateral.^2 +Eyy.^2); % 2nd Invariant strain rate 
 
 %% reblank out NaNs if needed
-% nnz(isnan(Ve_insar)) 检查NaN 个数
-mask_valid = ~isnan(Ve_insar);   % 你的原始 Ve（real case）
+% nnz(isnan(Ve_insar));         % Check the number of NaN values
+mask_valid = ~isnan(Ve_insar);   % mask using Original Ve
 
-% V_gaussian(~mask_valid)=nan; 
-% V_median1(~mask_valid)=nan; 
-% V_bilateral(~mask_valid)=nan; 
+V_gaussian(~mask_valid)=nan; 
+V_median(~mask_valid)=nan; 
+V_bilateral(~mask_valid)=nan; 
 
-% s_dvedx_gaussian(~mask_valid)=nan; 
-% s_dvedx_median1(~mask_valid)=nan; 
+s_dvedx_gaussian(~mask_valid)=nan; 
+s_dvedx_median(~mask_valid)=nan; 
 s_dvedx_bilateral(~mask_valid)=nan; 
-% s_dvedy_gaussian(~mask_valid)=nan; 
-% s_dvedy_median1(~mask_valid)=nan; 
+s_dvedy_gaussian(~mask_valid)=nan; 
+s_dvedy_median(~mask_valid)=nan; 
 s_dvedy_bilateral(~mask_valid)=nan; 
 
-% Evort_gaussian(~mask_valid)=nan; 
-% Edil_gaussian(~mask_valid)=nan; 
-% Eshear_gaussian(~mask_valid)=nan; 
-% EII_gaussian(~mask_valid)=nan; 
-% Evort_median1(~mask_valid)=nan; 
-% Edil_median1(~mask_valid)=nan; 
-% Eshear_median1(~mask_valid)=nan; 
-% EII_median1(~mask_valid)=nan; 
+Evort_gaussian(~mask_valid)=nan; 
+Edil_gaussian(~mask_valid)=nan; 
+Eshear_gaussian(~mask_valid)=nan; 
+EII_gaussian(~mask_valid)=nan; 
+Evort_median(~mask_valid)=nan; 
+Edil_median(~mask_valid)=nan; 
+Eshear_median(~mask_valid)=nan; 
+EII_median(~mask_valid)=nan; 
 Evort_bilateral(~mask_valid)=nan; 
 Edil_bilateral(~mask_valid)=nan; 
 Eshear_bilateral(~mask_valid)=nan; 
 EII_bilateral(~mask_valid)=nan; 
 
-% %% plot velocity gradients
+%% plot velocity gradients
 % % Load colormap
 % vik = importdata('vik.mat');
 % cpt.vik = vik;
@@ -198,8 +187,8 @@ EII_bilateral(~mask_valid)=nan;
 % 
 % 
 % subplot(3,3,2)
-% imagesc(xcoords,ycoords,Eshear_median1, ...
-%         'AlphaData', ~isnan(Eshear_median1));   % NaN 透明
+% imagesc(xcoords,ycoords,Eshear_median, ...
+%         'AlphaData', ~isnan(Eshear_median));   % NaN 透明
 % axis image
 % axis xy
 % caxis([-100 100])
@@ -224,8 +213,8 @@ EII_bilateral(~mask_valid)=nan;
 % end
 % 
 % % subplot(3,4,3)
-% % imagesc(xcoords,ycoords,Eshear_median2, ...
-% %         'AlphaData', ~isnan(Eshear_median2));   % NaN 透明
+% % imagesc(xcoords,ycoords,Eshear_median, ...
+% %         'AlphaData', ~isnan(Eshear_median));   % NaN 透明
 % % axis image
 % % axis xy
 % % caxis([-200 200])
@@ -304,8 +293,8 @@ EII_bilateral(~mask_valid)=nan;
 % 
 % 
 % subplot(3,3,5)
-% imagesc(xcoords,ycoords,Edil_median1, ...
-%         'AlphaData', ~isnan(Edil_median1));   % NaN 透明
+% imagesc(xcoords,ycoords,Edil_median, ...
+%         'AlphaData', ~isnan(Edil_median));   % NaN 透明
 % axis image
 % axis xy
 % caxis([-100 100])
@@ -330,8 +319,8 @@ EII_bilateral(~mask_valid)=nan;
 % end
 % 
 % % subplot(3,4,7)
-% % imagesc(xcoords,ycoords,Edil_median2, ...
-% %         'AlphaData', ~isnan(Edil_median2));   % NaN 透明
+% % imagesc(xcoords,ycoords,Edil_median, ...
+% %         'AlphaData', ~isnan(Edil_median));   % NaN 透明
 % % axis image
 % % axis xy
 % % caxis([-200 200])
@@ -409,8 +398,8 @@ EII_bilateral(~mask_valid)=nan;
 % 
 % 
 % subplot(3,3,8)
-% imagesc(xcoords,ycoords,Evort_median1, ...
-%         'AlphaData', ~isnan(Evort_median1));   % NaN 透明
+% imagesc(xcoords,ycoords,Evort_median, ...
+%         'AlphaData', ~isnan(Evort_median));   % NaN 透明
 % axis image
 % axis xy
 % caxis([-100 100])
@@ -435,8 +424,8 @@ EII_bilateral(~mask_valid)=nan;
 % end
 % 
 % % subplot(3,4,11)
-% % imagesc(xcoords,ycoords,Evort_median2, ...
-% %         'AlphaData', ~isnan(Evort_median2));   % NaN 透明
+% % imagesc(xcoords,ycoords,Evort_median, ...
+% %         'AlphaData', ~isnan(Evort_median));   % NaN 透明
 % % axis image
 % % axis xy
 % % caxis([-200 200])
@@ -488,27 +477,27 @@ EII_bilateral(~mask_valid)=nan;
 %% write to tiff
 outdir = 'AHB';
 % dvedx
-% geotiffwrite(fullfile(outdir, strcat('dvedx_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), s_dvedx_gaussian, R_e);
-geotiffwrite(fullfile(outdir, strcat('dvedx_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(range_sigma),'_median',num2str(center_winsize),'.tif')), s_dvedx_bilateral, R_e);
-% geotiffwrite(fullfile(outdir, strcat('dvedx_median_win',num2str(winsize),'.tif')), s_dvedx_median1, R_e);
+geotiffwrite(fullfile(outdir, strcat('dvedx_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), s_dvedx_gaussian, R_e);
+geotiffwrite(fullfile(outdir, strcat('dvedx_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(value_sigma),'_median',num2str(center_winsize),'.tif')), s_dvedx_bilateral, R_e);
+geotiffwrite(fullfile(outdir, strcat('dvedx_median_win',num2str(winsize),'.tif')), s_dvedx_median, R_e);
 % dvedy
-% geotiffwrite(fullfile(outdir, strcat('dvedy_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), s_dvedy_gaussian, R_e);
-geotiffwrite(fullfile(outdir, strcat('dvedy_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(range_sigma),'_median',num2str(center_winsize),'.tif')), s_dvedy_bilateral, R_e);
-% geotiffwrite(fullfile(outdir, strcat('dvedy_median_win',num2str(winsize),'.tif')), s_dvedy_median1, R_e);
+geotiffwrite(fullfile(outdir, strcat('dvedy_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), s_dvedy_gaussian, R_e);
+geotiffwrite(fullfile(outdir, strcat('dvedy_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(value_sigma),'_median',num2str(center_winsize),'.tif')), s_dvedy_bilateral, R_e);
+geotiffwrite(fullfile(outdir, strcat('dvedy_median_win',num2str(winsize),'.tif')), s_dvedy_median, R_e);
 % Max_shear
-% geotiffwrite(fullfile(outdir, strcat('Max_shear_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), Eshear_gaussian, R_e);
-geotiffwrite(fullfile(outdir, strcat('Max_shear_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(range_sigma),'_median',num2str(center_winsize),'.tif')), Eshear_bilateral, R_e);
-% geotiffwrite(fullfile(outdir, strcat('Max_shear_median_win',num2str(winsize),'.tif')), Eshear_median1, R_e);
+geotiffwrite(fullfile(outdir, strcat('Max_shear_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), Eshear_gaussian, R_e);
+geotiffwrite(fullfile(outdir, strcat('Max_shear_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(value_sigma),'_median',num2str(center_winsize),'.tif')), Eshear_bilateral, R_e);
+geotiffwrite(fullfile(outdir, strcat('Max_shear_median_win',num2str(winsize),'.tif')), Eshear_median, R_e);
 % Dil
-% geotiffwrite(fullfile(outdir, strcat('Dil_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), Edil_gaussian, R_e);
-geotiffwrite(fullfile(outdir, strcat('Dil_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(range_sigma),'_median',num2str(center_winsize),'.tif')), Edil_bilateral, R_e);
-% geotiffwrite(fullfile(outdir, strcat('Dil_median_win',num2str(winsize),'.tif')), Edil_median1, R_e);
+geotiffwrite(fullfile(outdir, strcat('Dil_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), Edil_gaussian, R_e);
+geotiffwrite(fullfile(outdir, strcat('Dil_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(value_sigma),'_median',num2str(center_winsize),'.tif')), Edil_bilateral, R_e);
+geotiffwrite(fullfile(outdir, strcat('Dil_median_win',num2str(winsize),'.tif')), Edil_median, R_e);
 % Vort
-% geotiffwrite(fullfile(outdir, strcat('Vort_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), Evort_gaussian, R_e);
-geotiffwrite(fullfile(outdir, strcat('Vort_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(range_sigma),'_median',num2str(center_winsize),'.tif')), Evort_bilateral, R_e);
-% geotiffwrite(fullfile(outdir, strcat('Vort_median_win',num2str(winsize),'.tif')), Evort_median1, R_e);
+geotiffwrite(fullfile(outdir, strcat('Vort_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), Evort_gaussian, R_e);
+geotiffwrite(fullfile(outdir, strcat('Vort_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(value_sigma),'_median',num2str(center_winsize),'.tif')), Evort_bilateral, R_e);
+geotiffwrite(fullfile(outdir, strcat('Vort_median_win',num2str(winsize),'.tif')), Evort_median, R_e);
 % II
-% geotiffwrite(fullfile(outdir, strcat('II_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), EII_gaussian, R_e);
-geotiffwrite(fullfile(outdir, strcat('II_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(range_sigma),'_median',num2str(center_winsize),'.tif')), EII_bilateral, R_e);
-% geotiffwrite(fullfile(outdir, strcat('II_median_win',num2str(winsize),'.tif')), EII_median1, R_e);
+geotiffwrite(fullfile(outdir, strcat('II_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), EII_gaussian, R_e);
+geotiffwrite(fullfile(outdir, strcat('II_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(value_sigma),'_median',num2str(center_winsize),'.tif')), EII_bilateral, R_e);
+geotiffwrite(fullfile(outdir, strcat('II_median_win',num2str(winsize),'.tif')), EII_median, R_e);
 disp(['Results saved to path']);

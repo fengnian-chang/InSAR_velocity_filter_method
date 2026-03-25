@@ -2,67 +2,49 @@ clear all
 % 走滑断层模型参数
 slip_rate = 5;                     % 自由滑动速率 mm/yr
 locking_depth_km = 20;             % 锁固深度 km
-creep_rate = 2;                    % 浅层蠕滑速率 mm/yr
+creep_rate = 0;                    % 浅层蠕滑速率 mm/yr
 creep_depth_km = 5;                % 浅层蠕滑深度 km
-noise_std = 1;                     % 噪声强度 mm/yr
+white_noise_std = 1;               % 白噪声（Gaussian）强度 mm/yr
+correlated_noise_std = 0.2;        % 空间相关噪声（Gaussian）强度 mm/yr（correlated length 30km + 100 km）
 grid_extent_km = [-200 200 -200 200]; % 区域范围 X: [-200,200] km, Y: [-200,200] km
 grid_res_km = 1;                  % 网格分辨率 km
 
+% 断层类型
+% fault_type = "step";      % used for test fault step
+fault_params.x0_km = 0;     % Invalid when fault_type = "straight"
+fault_params.y_left_km  = -50;
+fault_params.y_right_km =  50;
+
+fault_type = "straight";
+
 % 设置两个 NaN 区域（用于测试 NaN-aware 滤波器）
-nan_blocks = {
-    %{220, 260, 180, 220}
-    %{180, 220, 140, 180}
-    %{140, 180, 100, 140}
+% nan_type = 'both';
+% nan_type = 'distributed';
+nan_type = 'blocks';
+% nan_type = 'none';
+
+nan_params.do_plot = true;      % plot velocity and NaN settings
+
+% nan_params.bbox_km = [0 200 15 200];    % pixel density inside and outside the box
+% nan_params.p_in = 0.40;
+% nan_params.p_out = 0;
+
+% nan_params.y_split_km = 50;       % pixel density above and below the y_split
+% nan_params.p_above = 0.60;  
+% nan_params.p_below = 0;
+
+nan_params.blocks = {
     {220, 260, 260, 340};    % 第一块遮挡区域
-    %{40, 80, 120, 160};    % 第二块遮挡区域
-    %{40, 41, 120, 121} 
 };
 
 % 调用函数生成数据
 [V_clean, V_noisy, X, Y] = generate_synthetic_insar_velocities( ...
-    slip_rate, locking_depth_km, creep_rate, creep_depth_km, noise_std, grid_extent_km, grid_res_km, nan_blocks);
-
-%%
-% % 添加短波长水平速度扰动（Mogi源）
-% mogi_center = [-80, 100];  % 中心位置 (X, Y)，单位 km
-% mogi_depth = 10;            % 源深度 km
-% nu = 0.25;                 % 泊松比
-% deltaV = 5* pi * 10^3;           % 控制体积变化率（调节强度，默认最大速度 ~2mm/yr）
-% 
-% [XX, YY] = meshgrid(X(1,:), Y(:,1));
-% dx = XX - mogi_center(1);
-% dy = YY - mogi_center(2);
-% r = sqrt(dx.^2 + dy.^2);
-% R2 = r.^2 + mogi_depth^2;
-% 
-% % 径向水平速度 (mm/yr)
-% vr = (3 * (1 - nu) * deltaV .* r) ./ (pi * R2.^2);
-% 
-% % 投影到东西方向
-% v_mogi_E = -vr .* (dx ./ r);
-% v_mogi_E(r == 0) = 0;  % 中心点处理
-% % 添加局部沉降信号到原始带噪速度场
-% V_noisy = V_noisy + v_mogi_E;
-
-%%
-% 添加二维高斯噪声区域
-% noise_block_extent = [-120, 80, -80, 120];  % xmin, ymin, xmax, ymax
-% noise_mean = 1;     % mm/yr
-% noise_std = 1;      % mm/yr
-% 
-% % 生成逻辑掩码
-% xmask = X(1,:) >= noise_block_extent(1) & X(1,:) <= noise_block_extent(3);
-% ymask = Y(:,1) >= noise_block_extent(2) & Y(:,1) <= noise_block_extent(4);
-% mask = ymask * xmask;  % 外积生成二维逻辑掩码
-% 
-% % 添加二维高斯白噪声（相同大小，仅在掩码处有效）
-% rand_noise = noise_mean + noise_std * randn(size(V_noisy));
-% V_noisy(mask == 1) = V_noisy(mask == 1) + rand_noise(mask == 1);
+    slip_rate, locking_depth_km, creep_rate, creep_depth_km, white_noise_std, correlated_noise_std, grid_extent_km, grid_res_km, fault_type, fault_params, nan_type, nan_params);
 
 %%
 % 滤波参数
 spatial_sigma = 15;
-range_sigma = 1.5;
+range_sigma = 2;
 spatial_winsize = 100;
 
 center_winsize = 25;
@@ -209,12 +191,13 @@ subplot(4,6,5)
 plot(prof_y, prof_dVc1,'b'); grid on;
 title("Profile_3 ∂Ve/∂y Synth");
 ylim([0 100]);
+xlim([-100 100]);
 
 subplot(4,6,6)
 plot(prof_y, prof_dVc2,'r'); grid on;
 title("Profile_4 ∂Ve/∂y Synth");
 ylim([0 100]);
-
+xlim([-100 100]);
 %%%% ========================
 %%%% 2. Median
 %%%% ========================
@@ -246,13 +229,14 @@ plot(prof_y, prof_dVc1,'k:','LineWidth',1); hold on;
 plot(prof_y, prof_dVm1,'b'); grid on;
 title("Profile_3 ∂Ve/∂y Median");
 ylim([0 100]);
+xlim([-100 100]);
 
 subplot(4,6,12)
 plot(prof_y, prof_dVc2,'k:','LineWidth',1); hold on;
 plot(prof_y, prof_dVm2,'r'); grid on;
 title("Profile_4 ∂Ve/∂y Median");
 ylim([0 100]);
-
+xlim([-100 100]);
 %%%% ========================
 %%%% 3. Gaussian
 %%%% ========================
@@ -284,13 +268,14 @@ plot(prof_y, prof_dVc1,'k:','LineWidth',1); hold on;
 plot(prof_y, prof_dVg1,'b'); grid on;
 title("Profile_3 ∂Ve/∂y Gaussian");
 ylim([0 100]);
+xlim([-100 100]);
 
 subplot(4,6,18)
 plot(prof_y, prof_dVc2,'k:','LineWidth',1); hold on;
 plot(prof_y, prof_dVg2,'r'); grid on;
 title("Profile_4 ∂Ve/∂y Gaussian");
 ylim([0 100]);
-
+xlim([-100 100]);
 %%%% ========================
 %%%% 4. Bilateral
 %%%% ========================
@@ -323,9 +308,11 @@ plot(prof_y, prof_dVc1,'k:','LineWidth',1); hold on;
 plot(prof_y, prof_dVb1,'b'); grid on;
 title("Profile_3 ∂Ve/∂y Bilateral");
 ylim([0 100]);
+xlim([-100 100]);
 
 subplot(4,6,24)
 plot(prof_y, prof_dVc2,'k:','LineWidth',1); hold on;
 plot(prof_y, prof_dVb2,'r'); grid on;
 title("Profile_4 ∂Ve/∂y Bilateral");
 ylim([0 100]);
+xlim([-100 100]);

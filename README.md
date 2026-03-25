@@ -1,9 +1,13 @@
 This package provides four filtering methods for InSAR velocity fields: bilateral, Gaussian, median, and LOESS (currently a simplified version that fits a low-order polynomial within a moving window). The calling syntax for each method follows the corresponding function or the examples provided here.
 
 Examples:
+
 V_bilateral = bilateral_nanconv( V, spatial_sigma, range_sigma, spatial_winsize, center_winsize, center_mode, varargin);
+
 V_gaussian = nanconv(V, gauss_kernel, edge_nan_mode);
+
 V_median = nanmedfilt2(V, [winsize winsize], nan_mode);
+
 V_loess = loess_nanfit2_plane(V, winsize, nan_mode);
 
 Users can directly run filter_comparison_synthetic_profile.m to compare the performance of different methods on synthetic data. The parameters include the slip rate of an infinitely long strike-slip screw dislocation, locking depth, shallow creep rate, shallow creep depth, and noise (Gaussian white noise and spatially correlated noise).

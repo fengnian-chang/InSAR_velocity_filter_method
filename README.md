@@ -2,13 +2,13 @@ This package provides four filtering methods for InSAR velocity fields: bilatera
 
 Examples:
 
-V_bilateral = bilateral_nanconv( V, spatial_sigma, range_sigma, spatial_winsize, center_winsize, center_mode, varargin);
+```V_bilateral = bilateral_nanconv( V, spatial_sigma, range_sigma, spatial_winsize, center_winsize, center_mode, varargin);```
 
-V_gaussian = nanconv(V, gauss_kernel, edge_nan_mode);
+```V_gaussian = nanconv(V, gauss_kernel, edge_nan_mode);```
 
-V_median = nanmedfilt2(V, [winsize winsize], nan_mode);
+```V_median = nanmedfilt2(V, [winsize winsize], nan_mode);```
 
-V_loess = loess_nanfit2_plane(V, winsize, nan_mode);
+```V_loess = loess_nanfit2_plane(V, winsize, nan_mode);```
 
 Users can directly run  ```filter_comparison_synthetic_profile.m ``` to compare the performance of different methods on synthetic data. The parameters include the slip rate of an infinitely long strike-slip screw dislocation, locking depth, shallow creep rate, shallow creep depth, and noise (Gaussian white noise and spatially correlated noise). Users can also configure different fault parameters (e.g., fault step) and NaN settings by calling  ```generate_synthetic_insar_velocities.m ```, including NaN blocks and distributed NaNs, to simulate common conditions in real InSAR velocity fields.
 

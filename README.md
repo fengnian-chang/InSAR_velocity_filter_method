@@ -15,6 +15,7 @@ Users can directly run  ```filter_comparison_synthetic_profile.m ``` to compare 
 For real data applications, different filtering methods can be compared using the script  ```filter_comparison_AHB.m ```. Only the eastward and northward velocity components (Ve.tif and Vn.tif) are required as inputs, and these must be resampled onto a consistent grid with identical spatial resolution and extent. Note that the filtering methods here are pixel-based, and the choice of filtering parameters should be adjusted according to the resolution of the input velocity fields.
 
 Citing:
+
 Chang, F., Hooper, A. J., Dong, S., Yin, H., Fang, J., & Elliott, J. R. (2026). Robust Strain-Rate Mapping from Geodetic Velocity Fields Using Refined Bilateral Filtering.
 
 For questions, please contact cfn@smail.nju.edu.cn or xhfk9298@leeds.ac.uk

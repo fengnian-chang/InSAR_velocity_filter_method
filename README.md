@@ -2,7 +2,7 @@ This package provides four filtering methods for InSAR velocity fields: bilatera
 
 Examples:
 
-```V_bilateral = bilateral_nanconv( V, spatial_sigma, range_sigma, spatial_winsize, center_winsize, center_mode, varargin);```
+```V_bilateral = bilateral_nanconv(V, spatial_sigma, range_sigma, spatial_winsize, center_winsize, center_mode, varargin);```
 
 ```V_gaussian = nanconv(V, gauss_kernel, edge_nan_mode);```
 

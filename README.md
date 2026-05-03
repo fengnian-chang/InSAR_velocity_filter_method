@@ -16,6 +16,6 @@ For real data applications, different filtering methods can be compared using th
 
 ### Citing:
 
-Chang, F., Hooper, A. J., Dong, S., Yin, H., Fang, J., & Elliott, J. R. (2026). Robust Strain-Rate Mapping from Geodetic Velocity Fields Using Refined Bilateral Filtering.
+Chang, F., Hooper, A. J., Dong, S., Yin, H., Fang, J., & Elliott, J. R. (2026). Robust Strain-Rate Mapping from Geodetic Velocity Fields Using Refined Bilateral Filtering. ESS Open Archive. https://doi.org/10.22541/essoar.15002643/v1
 
 For questions, please contact cfn@smail.nju.edu.cn or xhfk9298@leeds.ac.uk

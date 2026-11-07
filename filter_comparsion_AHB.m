@@ -1,503 +1,152 @@
-clear all 
-%% READ IN GEOTIFFS
-[Vn_gnss, R_n] = readgeoraster('AHB/vn_AHB_final.tif','CoordinateSystemType','geographic');
-[Ve_insar, R_e] = readgeoraster('AHB/ve_AHB_final.tif','CoordinateSystemType','geographic');
+%% FILTER_COMPARSION_AHB
+% Apply Gaussian, median and nested bilateral filters to the east velocity
+% field of the Alpine-Himalayan Belt (AHB; Elliott et al., 2026) and compute
+% horizontal strain rates (Section 4).
+%
+% Inputs (folder AHB/, Eurasia-fixed velocities in mm/yr on a 0.01 deg grid):
+%   ve_AHB_final.tif - east velocity, mainly constrained by InSAR
+%   vn_AHB_final.tif - north velocity from smoothed GNSS (VELMAP)
+% Only the east velocity is filtered; the north velocity is used as provided.
+% Because the grid spacing is ~1 km, window sizes and sigma_s in pixels are
+% approximately in km.
+%
+% Filter parameters used in the paper (center_winsize = 40 for all results;
+% Gaussian and median filters use the same winsize as the bilateral filter):
+%   Pamirs, Western and Eastern Tibet, Makran-Hindu Kush:
+%       winsize = 91, spatial_sigma = 15, velocity_sigma = 3
+%   Anatolia:
+%       winsize = 91, spatial_sigma = 15, velocity_sigma = 5
+% The window size is ~6*sigma_s (three-sigma rule; Section 3.2).
+%
+% Outputs (GeoTIFF, written to AHB/), for each filter:
+%   dvedx, dvedy - east-velocity gradients (nstrain/yr)
+%   Max_shear    - maximum shear strain rate (Equation 6)
+%   Dil          - horizontal dilatation rate (Equation 5), positive = extension
+%   Vort         - vorticity, dVn/dx - dVe/dy (Figures S7-S11)
+% Pixels with no east velocity are set to NaN in all outputs.
+%
+% Required: bilateral_nanconv.m, nanconv.m, nanmedfilt2.m, haversine.m,
+%           Mapping Toolbox (readgeoraster, geotiffwrite, geocrop) and
+%           Image Processing Toolbox (fspecial).
+% Runtime: the bilateral and median filters loop over every pixel and take
+% many hours for the full AHB grid; set 'region' to process a subregion.
 
-xcoords = linspace(R_e.LongitudeLimits(1),R_e.LongitudeLimits(2),R_e.RasterSize(2));
-ycoords = linspace(R_e.LatitudeLimits(2),R_e.LatitudeLimits(1),R_e.RasterSize(1));
+clear; close all;
 
-%% Filter parameters (in px)
-spatial_sigma = 15;
-winsize = 91;
+%% ---------- 1. Settings ----------
+% Filter parameters (pixels; 1 pixel ~ 1 km)
+winsize        = 91;    % filtering window (odd, ~6*sigma_s)
+spatial_sigma  = 15;    % sigma_s
+velocity_sigma = 3;     % sigma_v (mm/yr)
+center_winsize = 40;    % center window for the reference velocity
 
-% for bilateral
-value_sigma = 3;    % velocity threshold
+% Region to process: [lon_min lon_max lat_min lat_max] (deg), [] = full AHB grid
+% e.g. Pamirs: [66 76 35 41]
+region = [];
 
-% Local small window used to calculate the reference velocity
-center_winsize = 25;    % Generally good for center_winsize between 20 and 50
+outdir = 'AHB';
+make_plot = true;       % quick-look map of the maximum shear strain rates
 
-% center_sigma = 1;  % if use local gaussuan
+%% ---------- 2. Read the velocity fields ----------
+[Ve_insar, R_e] = readgeoraster(fullfile('AHB', 've_AHB_final.tif'), 'CoordinateSystemType', 'geographic');
+[Vn_gnss,  R_n] = readgeoraster(fullfile('AHB', 'vn_AHB_final.tif'), 'CoordinateSystemType', 'geographic');
 
-%% Different Filter method (Bilateral, Median, Gaussian, and LOESS)
-% Gaussian（nan-aware）
+if ~isempty(region)
+    [Ve_insar, R_e] = geocrop(Ve_insar, R_e, region(3:4), region(1:2));
+    [Vn_gnss,  R_n] = geocrop(Vn_gnss,  R_n, region(3:4), region(1:2));
+end
+assert(isequal(size(Ve_insar), size(Vn_gnss)), 'East and north velocity grids must have the same size.');
+
+% Pixel-center coordinates (deg)
+[nrow, ncol] = size(Ve_insar);
+[~, xcoords] = intrinsicToGeographic(R_e, 1:ncol, ones(1, ncol));
+[ycoords, ~] = intrinsicToGeographic(R_e, ones(1, nrow), 1:nrow);
+
+%% ---------- 3. Filtering of the east velocity (NaN-aware) ----------
 gauss_kernel = fspecial('gaussian', [winsize winsize], spatial_sigma);
-V_gaussian = nanconv(Ve_insar, gauss_kernel, 'edge', 'nonanout');
+V_gaussian  = nanconv(Ve_insar, gauss_kernel, 'edge', 'nonanout');
+V_median    = nanmedfilt2(Ve_insar, [winsize winsize], 'nonanout');
+V_bilateral = bilateral_nanconv(Ve_insar, spatial_sigma, velocity_sigma, ...
+    winsize, center_winsize, 'median', 'nonanout');
 
-% Median（nan-aware）
-V_median = nanmedfilt2(Ve_insar, [winsize winsize], 'nonanout');
-
-% LOESS（nan-aware）
-% V_loess = loess_nanfit2_plane(V_noisy, winsize, 'nanout');
-
-% Bilateral（NaN-aware）
-V_bilateral = bilateral_nanconv(Ve_insar, spatial_sigma, value_sigma, winsize, center_winsize, 'median', 'nonanout');
-
-%% Calculate velocity gradients
-% GNSS velocity
-[dvndx,dvndy] = gradient(Vn_gnss);
-% InSAR velocity
-[dvedx_gaussian,dvedy_gaussian] = gradient(V_gaussian);
-[dvedx_median,dvedy_median] = gradient(V_median);
-[dvedx_bilateral,dvedy_bilateral] = gradient(V_bilateral);
-
-scaley = -1000/haversine(ycoords(1),xcoords(1),ycoords(2),xcoords(1));
-scalex = zeros(length(ycoords),1);
+%% ---------- 4. Velocity gradients (nstrain/yr) ----------
+% gradient() returns differences per pixel (mm/yr per pixel). Dividing by the
+% pixel spacing in km gives (mm/yr)/km = 1e-6 /yr; the factor 1000 converts
+% this to nstrain/yr. The sign makes y point north and x point east (for a
+% north-up grid, rows run from north to south and the y scale is negative).
+scaley = sign(ycoords(2) - ycoords(1)) * 1000 / haversine(ycoords(1), xcoords(1), ycoords(2), xcoords(1));
+scalex = zeros(length(ycoords), 1);
 for i = 1:length(ycoords)
-    scalex(i) = 1000/haversine(ycoords(i),xcoords(1),ycoords(i),xcoords(2));
+    scalex(i) = sign(xcoords(2) - xcoords(1)) * 1000 / haversine(ycoords(i), xcoords(1), ycoords(i), xcoords(2));
 end
 
-s_dvndy = dvndy*scaley;
-s_dvndx = dvndx.*scalex;
+[dvndx, dvndy] = gradient(Vn_gnss);
+s_dvndx = dvndx .* scalex;
+s_dvndy = dvndy * scaley;
 
-s_dvedx_gaussian = dvedx_gaussian.*scalex;
-s_dvedy_gaussian = dvedy_gaussian*scaley;
-s_dvedx_median = dvedx_median.*scalex;
-s_dvedy_median = dvedy_median*scaley;
-s_dvedx_bilateral = dvedx_bilateral.*scalex;
-s_dvedy_bilateral = dvedy_bilateral*scaley;
+methods = {'gaussian', 'median', 'bilateral'};
+Vf = {V_gaussian, V_median, V_bilateral};
 
-%% Read the fault data and prepare to plot
-% gmt_file = 'fault/gem_active_faults.gmt';
-% 
-% fid = fopen(gmt_file,'r');
-% faults = {};   % 用 cell 数组存放每一条断层
-% current_x = [];
-% current_y = [];
-% 
-% while true
-%     line = fgetl(fid);
-%     if ~ischar(line), break; end
-% 
-%     % --- 每段开始标识符 ---
-%     if startsWith(line, '>')
-%         % 保存上一段
-%         if ~isempty(current_x)
-%             faults{end+1} = [current_x(:), current_y(:)];
-%         end
-%         current_x = [];
-%         current_y = [];
-%         continue;
-%     end
-% 
-%     % --- 解析 lon lat ---
-%     vals = sscanf(line, '%f %f');
-%     if numel(vals) == 2
-%         current_x(end+1) = vals(1);
-%         current_y(end+1) = vals(2);
-%     end
-% end
-% fclose(fid);
-% 
-% % 最后一段加入
-% if ~isempty(current_x)
-%     faults{end+1} = [current_x(:), current_y(:)];
-% end
-% 
-% % ==== 由速度场确定绘图经纬度范围 ====
-% xmin = min(xcoords);
-% xmax = max(xcoords);
-% ymin = min(ycoords);
-% ymax = max(ycoords);
+mask_valid = ~isnan(Ve_insar);   % output mask from the original east velocity
+for k = 1:numel(methods)
+    [dvedx, dvedy] = gradient(Vf{k});
+    s_dvedx = dvedx .* scalex;
+    s_dvedy = dvedy * scaley;
 
-%% Calculate and plot strain rate tensor components plus derived products
-Eyy = s_dvndy;
-Exx_gaussian = s_dvedx_gaussian;
-Exx_median = s_dvedx_median;
-Exx_bilateral = s_dvedx_bilateral;
-Exy_gaussian = 1/2*(s_dvedy_gaussian+s_dvndx);
-Exy_median = 1/2*(s_dvedy_median+s_dvndx);
-Exy_bilateral = 1/2*(s_dvedy_bilateral+s_dvndx);
+    %% ---------- 5. Strain-rate tensor and derived quantities ----------
+    Exx = s_dvedx;
+    Eyy = s_dvndy;
+    Exy = 0.5 * (s_dvedy + s_dvndx);
 
-% InSAR GNSS Combine
-Evort_gaussian = s_dvndx - s_dvedy_gaussian ;  % vorticity
-Edil_gaussian = Exx_gaussian + Eyy; % dilatation
-Eshear_gaussian = sqrt(Exy_gaussian.^2 + (Exx_gaussian - Eyy).^2/4); % Max shearstrain rate
-EII_gaussian = sqrt(Exx_gaussian.^2 + 2*Exy_gaussian.^2 +Eyy.^2); % 2nd Invariant strain rate 
+    S.(methods{k}).dvedx     = s_dvedx;
+    S.(methods{k}).dvedy     = s_dvedy;
+    S.(methods{k}).Max_shear = sqrt(Exy.^2 + (Exx - Eyy).^2 / 4);   % maximum shear strain rate
+    S.(methods{k}).Dil       = Exx + Eyy;                           % dilatation rate
+    S.(methods{k}).Vort      = s_dvndx - s_dvedy;                   % vorticity
 
-Evort_median = s_dvndx - s_dvedy_median ;  % vorticity
-Edil_median = Exx_median + Eyy; % dilatation
-Eshear_median = sqrt(Exy_median.^2 + (Exx_median - Eyy).^2/4); % Max shearstrain rate
-EII_median = sqrt(Exx_median.^2 + 2*Exy_median.^2 +Eyy.^2); % 2nd Invariant strain rate 
+    % Re-apply the data mask of the original east velocity
+    fields = fieldnames(S.(methods{k}));
+    for f = 1:numel(fields)
+        S.(methods{k}).(fields{f})(~mask_valid) = NaN;
+    end
+end
 
-Evort_bilateral = s_dvndx - s_dvedy_bilateral ;  % vorticity
-Edil_bilateral = Exx_bilateral + Eyy; % dilatation
-Eshear_bilateral = sqrt(Exy_bilateral.^2 + (Exx_bilateral - Eyy).^2/4); % Max shearstrain rate
-EII_bilateral = sqrt(Exx_bilateral.^2 + 2*Exy_bilateral.^2 +Eyy.^2); % 2nd Invariant strain rate 
+%% ---------- 6. Write GeoTIFFs ----------
+if ~exist(outdir, 'dir')
+    mkdir(outdir);
+end
 
-%% reblank out NaNs if needed
-% nnz(isnan(Ve_insar));         % Check the number of NaN values
-mask_valid = ~isnan(Ve_insar);   % mask using Original Ve
+tag.gaussian  = sprintf('win%d_sig_s%d', winsize, spatial_sigma);
+tag.median    = sprintf('win%d', winsize);
+tag.bilateral = sprintf('win%d_sig_s%d_sig_v%d_median%d', winsize, spatial_sigma, velocity_sigma, center_winsize);
+if ~isempty(region)
+    region_tag = sprintf('_lon%g-%g_lat%g-%g', region);
+else
+    region_tag = '';
+end
 
-V_gaussian(~mask_valid)=nan; 
-V_median(~mask_valid)=nan; 
-V_bilateral(~mask_valid)=nan; 
+quantities = {'dvedx', 'dvedy', 'Max_shear', 'Dil', 'Vort'};
+for k = 1:numel(methods)
+    for q = 1:numel(quantities)
+        fname = sprintf('%s_%s_%s%s.tif', quantities{q}, methods{k}, tag.(methods{k}), region_tag);
+        geotiffwrite(fullfile(outdir, fname), S.(methods{k}).(quantities{q}), R_e);
+    end
+end
+disp(['Results saved to ', outdir]);
 
-s_dvedx_gaussian(~mask_valid)=nan; 
-s_dvedx_median(~mask_valid)=nan; 
-s_dvedx_bilateral(~mask_valid)=nan; 
-s_dvedy_gaussian(~mask_valid)=nan; 
-s_dvedy_median(~mask_valid)=nan; 
-s_dvedy_bilateral(~mask_valid)=nan; 
-
-Evort_gaussian(~mask_valid)=nan; 
-Edil_gaussian(~mask_valid)=nan; 
-Eshear_gaussian(~mask_valid)=nan; 
-EII_gaussian(~mask_valid)=nan; 
-Evort_median(~mask_valid)=nan; 
-Edil_median(~mask_valid)=nan; 
-Eshear_median(~mask_valid)=nan; 
-EII_median(~mask_valid)=nan; 
-Evort_bilateral(~mask_valid)=nan; 
-Edil_bilateral(~mask_valid)=nan; 
-Eshear_bilateral(~mask_valid)=nan; 
-EII_bilateral(~mask_valid)=nan; 
-
-%% plot velocity gradients
-% % Load colormap
-% vik = importdata('vik.mat');
-% cpt.vik = vik;
-% 
-% figure(1)
-% 
-% subplot(3,3,1)
-% imagesc(xcoords,ycoords,Eshear_gaussian, ...
-%         'AlphaData', ~isnan(Eshear_gaussian));   % NaN 透明
-% axis image
-% axis xy
-% caxis([-100 100])
-% title('Shear gaussian (win:100km, sig:15km)')
-% colormap(vik)
-% set(gca,'Color',[1 1 1])                          % 背景（NaN 区域）纯白
-% colorbar
-% hold on
-% for i = 1:length(faults)
-%     lon = faults{i}(:,1);
-%     lat = faults{i}(:,2);
-% 
-%     % 只保留在 bbox 内的点（外面的设为 NaN，这样 plot 会断开）
-%     in = lon >= xmin & lon <= xmax & lat >= ymin & lat <= ymax;
-%     if any(in)
-%         lon_plot = lon;
-%         lat_plot = lat;
-%         lon_plot(~in) = NaN;
-%         lat_plot(~in) = NaN;
-%         plot(lon_plot, lat_plot, 'k--', 'LineWidth', 0.1);
-%     end
-% end
-% 
-% 
-% subplot(3,3,2)
-% imagesc(xcoords,ycoords,Eshear_median, ...
-%         'AlphaData', ~isnan(Eshear_median));   % NaN 透明
-% axis image
-% axis xy
-% caxis([-100 100])
-% title('Shear median square (win:100km)')
-% colormap(vik)
-% set(gca,'Color',[1 1 1])                          % 背景（NaN 区域）纯白
-% %colorbar
-% hold on
-% for i = 1:length(faults)
-%     lon = faults{i}(:,1);
-%     lat = faults{i}(:,2);
-% 
-%     % 只保留在 bbox 内的点（外面的设为 NaN，这样 plot 会断开）
-%     in = lon >= xmin & lon <= xmax & lat >= ymin & lat <= ymax;
-%     if any(in)
-%         lon_plot = lon;
-%         lat_plot = lat;
-%         lon_plot(~in) = NaN;
-%         lat_plot(~in) = NaN;
-%         plot(lon_plot, lat_plot, 'k--', 'LineWidth', 0.1);
-%     end
-% end
-% 
-% % subplot(3,4,3)
-% % imagesc(xcoords,ycoords,Eshear_median, ...
-% %         'AlphaData', ~isnan(Eshear_median));   % NaN 透明
-% % axis image
-% % axis xy
-% % caxis([-200 200])
-% % title('Eshear median circle (win:150km)')
-% % colormap(vik)
-% % set(gca,'Color',[1 1 1])                          % 背景（NaN 区域）纯白
-% % %colorbar
-% % hold on
-% % for i = 1:length(faults)
-% %     lon = faults{i}(:,1);
-% %     lat = faults{i}(:,2);
-% % 
-% %     % 只保留在 bbox 内的点（外面的设为 NaN，这样 plot 会断开）
-% %     in = lon >= xmin & lon <= xmax & lat >= ymin & lat <= ymax;
-% %     if any(in)
-% %         lon_plot = lon;
-% %         lat_plot = lat;
-% %         lon_plot(~in) = NaN;
-% %         lat_plot(~in) = NaN;
-% %         plot(lon_plot, lat_plot, 'k--', 'LineWidth', 0.1);
-% %     end
-% % end
-% 
-% subplot(3,3,3)
-% imagesc(xcoords,ycoords,Eshear_bilateral, ...
-%         'AlphaData', ~isnan(Eshear_bilateral));   % NaN 透明
-% axis image
-% axis xy
-% caxis([-100 100])
-% title('Shear bilateral (win:100km, sig_s:15km, sig_v:3mm/yr)')
-% colormap(vik)
-% set(gca,'Color',[1 1 1])                          % 背景（NaN 区域）纯白
-% %colorbar
-% hold on
-% for i = 1:length(faults)
-%     lon = faults{i}(:,1);
-%     lat = faults{i}(:,2);
-% 
-%     % 只保留在 bbox 内的点（外面的设为 NaN，这样 plot 会断开）
-%     in = lon >= xmin & lon <= xmax & lat >= ymin & lat <= ymax;
-%     if any(in)
-%         lon_plot = lon;
-%         lat_plot = lat;
-%         lon_plot(~in) = NaN;
-%         lat_plot(~in) = NaN;
-%         plot(lon_plot, lat_plot, 'k--', 'LineWidth', 0.1);
-%     end
-% end
-% 
-% 
-% subplot(3,3,4)
-% imagesc(xcoords,ycoords,Edil_gaussian, ...
-%         'AlphaData', ~isnan(Edil_gaussian));   % NaN 透明
-% axis image
-% axis xy
-% caxis([-100 100])
-% title('Dil gaussian')
-% colormap(vik)
-% set(gca,'Color',[1 1 1])                          % 背景（NaN 区域）纯白
-% %colorbar
-% hold on
-% for i = 1:length(faults)
-%     lon = faults{i}(:,1);
-%     lat = faults{i}(:,2);
-% 
-%     % 只保留在 bbox 内的点（外面的设为 NaN，这样 plot 会断开）
-%     in = lon >= xmin & lon <= xmax & lat >= ymin & lat <= ymax;
-%     if any(in)
-%         lon_plot = lon;
-%         lat_plot = lat;
-%         lon_plot(~in) = NaN;
-%         lat_plot(~in) = NaN;
-%         plot(lon_plot, lat_plot, 'k--', 'LineWidth', 0.1);
-%     end
-% end
-% 
-% 
-% subplot(3,3,5)
-% imagesc(xcoords,ycoords,Edil_median, ...
-%         'AlphaData', ~isnan(Edil_median));   % NaN 透明
-% axis image
-% axis xy
-% caxis([-100 100])
-% title('Dil median square')
-% colormap(vik)
-% set(gca,'Color',[1 1 1])                          % 背景（NaN 区域）纯白
-% %colorbar
-% hold on
-% for i = 1:length(faults)
-%     lon = faults{i}(:,1);
-%     lat = faults{i}(:,2);
-% 
-%     % 只保留在 bbox 内的点（外面的设为 NaN，这样 plot 会断开）
-%     in = lon >= xmin & lon <= xmax & lat >= ymin & lat <= ymax;
-%     if any(in)
-%         lon_plot = lon;
-%         lat_plot = lat;
-%         lon_plot(~in) = NaN;
-%         lat_plot(~in) = NaN;
-%         plot(lon_plot, lat_plot, 'k--', 'LineWidth', 0.1);
-%     end
-% end
-% 
-% % subplot(3,4,7)
-% % imagesc(xcoords,ycoords,Edil_median, ...
-% %         'AlphaData', ~isnan(Edil_median));   % NaN 透明
-% % axis image
-% % axis xy
-% % caxis([-200 200])
-% % title('Edil median circle')
-% % colormap(vik)
-% % set(gca,'Color',[1 1 1])                          % 背景（NaN 区域）纯白
-% % %colorbar
-% % hold on
-% % for i = 1:length(faults)
-% %     lon = faults{i}(:,1);
-% %     lat = faults{i}(:,2);
-% % 
-% %     % 只保留在 bbox 内的点（外面的设为 NaN，这样 plot 会断开）
-% %     in = lon >= xmin & lon <= xmax & lat >= ymin & lat <= ymax;
-% %     if any(in)
-% %         lon_plot = lon;
-% %         lat_plot = lat;
-% %         lon_plot(~in) = NaN;
-% %         lat_plot(~in) = NaN;
-% %         plot(lon_plot, lat_plot, 'k--', 'LineWidth', 0.1);
-% %     end
-% % end
-% 
-% subplot(3,3,6)
-% imagesc(xcoords,ycoords,Edil_bilateral, ...
-%         'AlphaData', ~isnan(Edil_bilateral));   % NaN 透明
-% axis image
-% axis xy
-% caxis([-100 100])
-% title('Dil bilateral')
-% colormap(vik)
-% set(gca,'Color',[1 1 1])                          % 背景（NaN 区域）纯白
-% %colorbar
-% hold on
-% for i = 1:length(faults)
-%     lon = faults{i}(:,1);
-%     lat = faults{i}(:,2);
-% 
-%     % 只保留在 bbox 内的点（外面的设为 NaN，这样 plot 会断开）
-%     in = lon >= xmin & lon <= xmax & lat >= ymin & lat <= ymax;
-%     if any(in)
-%         lon_plot = lon;
-%         lat_plot = lat;
-%         lon_plot(~in) = NaN;
-%         lat_plot(~in) = NaN;
-%         plot(lon_plot, lat_plot, 'k--', 'LineWidth', 0.1);
-%     end
-% end
-% 
-% subplot(3,3,7)
-% imagesc(xcoords,ycoords,Evort_gaussian, ...
-%         'AlphaData', ~isnan(Evort_gaussian));   % NaN 透明
-% axis image
-% axis xy
-% caxis([-100 100])
-% title('Vort gaussian')
-% colormap(vik)
-% set(gca,'Color',[1 1 1])                          % 背景（NaN 区域）纯白
-% %colorbar
-% hold on
-% for i = 1:length(faults)
-%     lon = faults{i}(:,1);
-%     lat = faults{i}(:,2);
-% 
-%     % 只保留在 bbox 内的点（外面的设为 NaN，这样 plot 会断开）
-%     in = lon >= xmin & lon <= xmax & lat >= ymin & lat <= ymax;
-%     if any(in)
-%         lon_plot = lon;
-%         lat_plot = lat;
-%         lon_plot(~in) = NaN;
-%         lat_plot(~in) = NaN;
-%         plot(lon_plot, lat_plot, 'k--', 'LineWidth', 0.1);
-%     end
-% end
-% 
-% 
-% subplot(3,3,8)
-% imagesc(xcoords,ycoords,Evort_median, ...
-%         'AlphaData', ~isnan(Evort_median));   % NaN 透明
-% axis image
-% axis xy
-% caxis([-100 100])
-% title('Vort median square')
-% colormap(vik)
-% set(gca,'Color',[1 1 1])                          % 背景（NaN 区域）纯白
-% %colorbar
-% hold on
-% for i = 1:length(faults)
-%     lon = faults{i}(:,1);
-%     lat = faults{i}(:,2);
-% 
-%     % 只保留在 bbox 内的点（外面的设为 NaN，这样 plot 会断开）
-%     in = lon >= xmin & lon <= xmax & lat >= ymin & lat <= ymax;
-%     if any(in)
-%         lon_plot = lon;
-%         lat_plot = lat;
-%         lon_plot(~in) = NaN;
-%         lat_plot(~in) = NaN;
-%         plot(lon_plot, lat_plot, 'k--', 'LineWidth', 0.1);
-%     end
-% end
-% 
-% % subplot(3,4,11)
-% % imagesc(xcoords,ycoords,Evort_median, ...
-% %         'AlphaData', ~isnan(Evort_median));   % NaN 透明
-% % axis image
-% % axis xy
-% % caxis([-200 200])
-% % title('Evort median circle')
-% % colormap(vik)
-% % set(gca,'Color',[1 1 1])                          % 背景（NaN 区域）纯白
-% % %colorbar
-% % hold on
-% % for i = 1:length(faults)
-% %     lon = faults{i}(:,1);
-% %     lat = faults{i}(:,2);
-% % 
-% %     % 只保留在 bbox 内的点（外面的设为 NaN，这样 plot 会断开）
-% %     in = lon >= xmin & lon <= xmax & lat >= ymin & lat <= ymax;
-% %     if any(in)
-% %         lon_plot = lon;
-% %         lat_plot = lat;
-% %         lon_plot(~in) = NaN;
-% %         lat_plot(~in) = NaN;
-% %         plot(lon_plot, lat_plot, 'k--', 'LineWidth', 0.1);
-% %     end
-% % end
-% 
-% subplot(3,3,9)
-% imagesc(xcoords,ycoords,Evort_bilateral, ...
-%         'AlphaData', ~isnan(Evort_bilateral));   % NaN 透明
-% axis image
-% axis xy
-% caxis([-100 100])
-% title('Vort bilateral')
-% colormap(vik)
-% set(gca,'Color',[1 1 1])                          % 背景（NaN 区域）纯白
-% %colorbar
-% hold on
-% for i = 1:length(faults)
-%     lon = faults{i}(:,1);
-%     lat = faults{i}(:,2);
-% 
-%     % 只保留在 bbox 内的点（外面的设为 NaN，这样 plot 会断开）
-%     in = lon >= xmin & lon <= xmax & lat >= ymin & lat <= ymax;
-%     if any(in)
-%         lon_plot = lon;
-%         lat_plot = lat;
-%         lon_plot(~in) = NaN;
-%         lat_plot(~in) = NaN;
-%         plot(lon_plot, lat_plot, 'k--', 'LineWidth', 0.1);
-%     end
-% end
-%% write to tiff
-outdir = 'AHB';
-% dvedx
-geotiffwrite(fullfile(outdir, strcat('dvedx_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), s_dvedx_gaussian, R_e);
-geotiffwrite(fullfile(outdir, strcat('dvedx_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(value_sigma),'_median',num2str(center_winsize),'.tif')), s_dvedx_bilateral, R_e);
-geotiffwrite(fullfile(outdir, strcat('dvedx_median_win',num2str(winsize),'.tif')), s_dvedx_median, R_e);
-% dvedy
-geotiffwrite(fullfile(outdir, strcat('dvedy_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), s_dvedy_gaussian, R_e);
-geotiffwrite(fullfile(outdir, strcat('dvedy_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(value_sigma),'_median',num2str(center_winsize),'.tif')), s_dvedy_bilateral, R_e);
-geotiffwrite(fullfile(outdir, strcat('dvedy_median_win',num2str(winsize),'.tif')), s_dvedy_median, R_e);
-% Max_shear
-geotiffwrite(fullfile(outdir, strcat('Max_shear_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), Eshear_gaussian, R_e);
-geotiffwrite(fullfile(outdir, strcat('Max_shear_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(value_sigma),'_median',num2str(center_winsize),'.tif')), Eshear_bilateral, R_e);
-geotiffwrite(fullfile(outdir, strcat('Max_shear_median_win',num2str(winsize),'.tif')), Eshear_median, R_e);
-% Dil
-geotiffwrite(fullfile(outdir, strcat('Dil_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), Edil_gaussian, R_e);
-geotiffwrite(fullfile(outdir, strcat('Dil_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(value_sigma),'_median',num2str(center_winsize),'.tif')), Edil_bilateral, R_e);
-geotiffwrite(fullfile(outdir, strcat('Dil_median_win',num2str(winsize),'.tif')), Edil_median, R_e);
-% Vort
-geotiffwrite(fullfile(outdir, strcat('Vort_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), Evort_gaussian, R_e);
-geotiffwrite(fullfile(outdir, strcat('Vort_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(value_sigma),'_median',num2str(center_winsize),'.tif')), Evort_bilateral, R_e);
-geotiffwrite(fullfile(outdir, strcat('Vort_median_win',num2str(winsize),'.tif')), Evort_median, R_e);
-% II
-geotiffwrite(fullfile(outdir, strcat('II_gaussian_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'.tif')), EII_gaussian, R_e);
-geotiffwrite(fullfile(outdir, strcat('II_bilateral_win',num2str(winsize),'_sig_s',num2str(spatial_sigma),'_sig_v',num2str(value_sigma),'_median',num2str(center_winsize),'.tif')), EII_bilateral, R_e);
-geotiffwrite(fullfile(outdir, strcat('II_median_win',num2str(winsize),'.tif')), EII_median, R_e);
-disp(['Results saved to path']);
+%% ---------- 7. Quick-look plot ----------
+if make_plot
+    figure('Color', 'w', 'Position', [50 50 1500 450]);
+    titles = {'Gaussian', 'Median', 'Bilateral'};
+    for k = 1:numel(methods)
+        subplot(1, 3, k);
+        Z = S.(methods{k}).Max_shear;
+        imagesc(xcoords, ycoords, Z, 'AlphaData', ~isnan(Z));
+        axis image xy;
+        caxis([0 150]);
+        colormap(gca, flipud(hot));
+        colorbar;
+        title(sprintf('Max shear, %s (nstrain/yr)', titles{k}), 'FontWeight', 'normal');
+        xlabel('Longitude (\circ)'); ylabel('Latitude (\circ)');
+    end
+end

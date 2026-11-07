@@ -1,318 +1,184 @@
-clear all 
-% 走滑断层模型参数
-slip_rate = 5;                     % 自由滑动速率 mm/yr
-locking_depth_km = 20;             % 锁固深度 km
-creep_rate = 0;                    % 浅层蠕滑速率 mm/yr
-creep_depth_km = 5;                % 浅层蠕滑深度 km
-white_noise_std = 1;               % 白噪声（Gaussian）强度 mm/yr
-correlated_noise_std = 0.2;        % 空间相关噪声（Gaussian）强度 mm/yr（correlated length 30km + 100 km）
-grid_extent_km = [-200 200 -200 200]; % 区域范围 X: [-200,200] km, Y: [-200,200] km
-grid_res_km = 1;                  % 网格分辨率 km
+%% FILTER_COMPARSION_SYNTHETIC_PROFILE
+% Compare Gaussian, median and nested bilateral filtering of a synthetic
+% velocity field from a 2D screw dislocation model (Section 3.1).
+%
+% Settings used in the paper:
+%   Figure 2a  : creep_rate = 0, nan_type = 'blocks'
+%   Figure 2b  : creep_rate = 2, nan_type = 'blocks'
+%   Figure S4a : creep_rate = 0, nan_type = 'distributed'
+%   Figure S4b : creep_rate = 2, nan_type = 'distributed'
+%
+% Noise (Text S1): 1 mm/yr Gaussian white noise + 0.4 mm/yr spatially
+% correlated noise with a Lorentzian power spectrum (Lc = 500 km).
+% Filters: 100 km window for all methods; sigma_s = 15 km for the Gaussian
+% and bilateral filters; sigma_v = 2 mm/yr and a 40 km median center window
+% for the bilateral filter.
+%
+% Strain rates are represented by dVe/dy (nstrain/yr), the gradient of the
+% east velocity in the fault-perpendicular direction.
+%
+% Required: generate_synthetic_insar_velocities.m,
+%           generate_correlated_noise_fft_Lc.m, bilateral_nanconv.m,
+%           nanconv.m, nanmedfilt2.m, vik.mat
+% Runtime: a few minutes (the bilateral filter is a pixel-by-pixel loop).
 
-% 断层类型
-% fault_type = "step";      % used for test fault step
-fault_params.x0_km = 0;     % Invalid when fault_type = "straight"
-fault_params.y_left_km  = -50;
-fault_params.y_right_km =  50;
+clear; close all;
 
-fault_type = "straight";
+%% ---------- 1. Synthetic model ----------
+slip_rate            = 5;       % slip rate S (mm/yr)
+locking_depth_km     = 20;      % locking depth D1 (km)
+creep_rate           = 0;       % shallow creep rate C (mm/yr): 0 (Fig. 2a/S4a) or 2 (Fig. 2b/S4b)
+creep_depth_km       = 5;       % creeping depth D2 (km)
+white_noise_std      = 1;       % Gaussian white noise (mm/yr)
+correlated_noise_std = 0.4;     % correlated noise, Lc = 500 km (mm/yr)
+grid_extent_km       = [-200 200 -200 200];   % [xmin xmax ymin ymax] (km)
+grid_res_km          = 1;       % grid spacing (km)
 
-% 设置两个 NaN 区域（用于测试 NaN-aware 滤波器）
-% nan_type = 'both';
-% nan_type = 'distributed';
-nan_type = 'blocks';
-% nan_type = 'none';
+fault_type   = "straight";      % east-west fault along y = 0
+fault_params = struct();
 
-nan_params.do_plot = true;      % plot velocity and NaN settings
+% Data gaps
+nan_type = 'blocks';            % 'blocks' (Figure 2) or 'distributed' (Figure S4)
+nan_params.do_plot = false;     % true: plot the noise components and NaN mask
+switch nan_type
+    case 'blocks'
+        % One rectangular gap given by row and column indices
+        nan_params.blocks = {{220, 260, 260, 340}};
+    case 'distributed'
+        % 40% of pixels removed at random within x = 0-200 km, y = 15-200 km
+        nan_params.bbox_km = [0 200 15 200];
+        nan_params.p_in    = 0.40;
+        nan_params.p_out   = 0;
+end
 
-% nan_params.bbox_km = [0 200 15 200];    % pixel density inside and outside the box
-% nan_params.p_in = 0.40;
-% nan_params.p_out = 0;
-
-% nan_params.y_split_km = 50;       % pixel density above and below the y_split
-% nan_params.p_above = 0.60;  
-% nan_params.p_below = 0;
-
-nan_params.blocks = {
-    {220, 260, 260, 340};    % 第一块遮挡区域
-};
-
-% 调用函数生成数据
 [V_clean, V_noisy, X, Y] = generate_synthetic_insar_velocities( ...
-    slip_rate, locking_depth_km, creep_rate, creep_depth_km, white_noise_std, correlated_noise_std, grid_extent_km, grid_res_km, fault_type, fault_params, nan_type, nan_params);
+    slip_rate, locking_depth_km, creep_rate, creep_depth_km, ...
+    white_noise_std, correlated_noise_std, grid_extent_km, grid_res_km, ...
+    fault_type, fault_params, nan_type, nan_params);
 
-%%
-% 滤波参数
-spatial_sigma = 15;
-range_sigma = 2;
-spatial_winsize = 100;
-
-center_winsize = 25;
-% center_sigma = 5;   % 大概2σ对应half_winsize(95.45%),3σ 99.8%, 当center_mode = 'gaussian'时使用
+%% ---------- 2. Filtering ----------
+spatial_winsize = 100;   % filtering window (pixels = km)
+spatial_sigma   = 15;    % sigma_s (pixels = km), ~1/6 of the window
+velocity_sigma  = 2;     % sigma_v (mm/yr), ~2x the noise level
+center_winsize  = 40;    % center window for the reference velocity (pixels = km)
 
 gauss_kernel = fspecial('gaussian', [spatial_winsize spatial_winsize], spatial_sigma);
 
-% 高斯滤波（nan-aware）
-V_gaussian = nanconv(V_noisy, gauss_kernel, 'edge', 'nanout');
+V.Gaussian  = nanconv(V_noisy, gauss_kernel, 'edge', 'nanout');
+V.Median    = nanmedfilt2(V_noisy, [spatial_winsize spatial_winsize], 'nanout');
+V.Bilateral = bilateral_nanconv(V_noisy, spatial_sigma, velocity_sigma, ...
+    spatial_winsize, center_winsize, 'median', 'nanout');
 
-% 中值滤波（nan-aware）
-V_median = nanmedfilt2(V_noisy, [spatial_winsize spatial_winsize], 'nanout');
+%% ---------- 3. Strain rate dVe/dy (nstrain/yr) ----------
+% (mm/yr)/km = 1e-6 /yr = 1e3 nstrain/yr
+[~, dVc_dy] = gradient(V_clean, grid_res_km);
+dVc_dy = dVc_dy * 1e3;
 
-% LOESS滤波（nan-aware）
-% V_loess = loess_nanfit2_plane(V_noisy, spatial_winsize, 'nanout');
+methods = ["Median", "Gaussian", "Bilateral"];
+for name = methods
+    [~, d] = gradient(V.(name), grid_res_km);
+    dV.(name) = d * 1e3;
+end
 
-% 双边滤波（NaN-aware）
-V_bilateral = bilateral_nanconv(V_noisy, spatial_sigma, range_sigma, spatial_winsize, center_winsize, 'median', 'nanout');
-%V_bilateral = bilateral_nanconv(V_noisy, spatial_sigma, range_sigma, spatial_winsize, center_winsize, 'gaussian', center_sigma, 'nanout');
+%% ---------- 4. Swath profiles ----------
+% Profiles are averaged over 20 km-wide swaths across the fault
+xmask1 = X(1,:) >= -110 & X(1,:) <= -90;    % profile 1 (blue)
+xmask2 = X(1,:) >=   90 & X(1,:) <= 110;    % profile 2 (red), crosses the data gap
+xmask_clean = X(1,:) >= -10 & X(1,:) <= 10; % continuous noise-free velocity profile
 
-% 计算 dv/dy（向北方向的速度梯度）
-dy = grid_res_km;
-[~, dVc_dy] = gradient(V_clean, dy);   % 合成速率的应变率
-[~, dVg_dy] = gradient(V_gaussian, dy);   % 高斯滤波后的应变率
-[~, dVm_dy] = gradient(V_median, dy);     % 中值滤波后的应变率
-% [~, dVl_dy] = gradient(V_loess, 1);    % LOESS滤波后的应变率
-[~, dVb_dy] = gradient(V_bilateral, dy);  % 双边滤波后的应变率
+prof_y   = Y(:,1);
+prof_Vc  = mean(V_clean(:, xmask_clean), 2, "omitnan");
+prof_dVc = {mean(dVc_dy(:, xmask1), 2, "omitnan"), mean(dVc_dy(:, xmask2), 2, "omitnan")};
+masks    = {xmask1, xmask2};
+colors   = {'b', 'r'};
 
-% 换算为 nstrain/yr
-dVc_dy = dVc_dy * 1e3; 
-dVg_dy = dVg_dy * 1e3; 
-dVm_dy = dVm_dy * 1e3; 
-% dVl_dy = dVl_dy * 1e3;
-dVb_dy = dVb_dy * 1e3;
-
-% Load colormap
+%% ---------- 5. Plot ----------
 vik = importdata('vik.mat');
-cpt.vik = vik;
+vlim = [floor(min(prof_Vc)) - 0.2, ceil(max(prof_Vc)) + 0.2];
 
-%% 提取剖面 (x = -10~10 km; y 全部)
-xmask1 = X(1,:) >= -110 & X(1,:) <= -90;    % green profile
-xmask2 = X(1,:) >= 90 & X(1,:) <= 110;  % red profile
-xmask_clean = X(1,:) >= -10 & X(1,:) <= 10; %用于绘制完整无间断剖面（合成数据基准）
+figure('Color', 'w', 'Position', [50 50 1500 900]);
+set(gcf, 'DefaultAxesFontName', 'Calibri', 'DefaultTextFontName', 'Calibri');
 
-prof_y = Y(:,1);  % y 方向
-prof_Vc     = mean(V_clean(:, xmask_clean), 2, "omitnan"); %完整clean剖面
-% profile 1
-prof_Vn1     = mean(V_noisy(:, xmask1), 2, "omitnan");
-prof_Vm1     = mean(V_median(:, xmask1), 2, "omitnan");
-prof_Vg1     = mean(V_gaussian(:, xmask1), 2, "omitnan");
-% prof_Vl1     = mean(V_loess(:, xmask1), 2, "omitnan");
-prof_Vb1     = mean(V_bilateral(:, xmask1), 2, "omitnan");
-
-prof_dVc1    = mean(dVc_dy(:, xmask1), 2, "omitnan");
-prof_dVm1    = mean(dVm_dy(:, xmask1), 2, "omitnan");
-prof_dVg1    = mean(dVg_dy(:, xmask1), 2, "omitnan");
-% prof_dVl1    = mean(dVl_dy(:, xmask1), 2, "omitnan");
-prof_dVb1    = mean(dVb_dy(:, xmask1), 2, "omitnan");
-
-% profile 2
-prof_Vn2     = mean(V_noisy(:, xmask2), 2, "omitnan");
-prof_Vm2     = mean(V_median(:, xmask2), 2, "omitnan");
-prof_Vg2     = mean(V_gaussian(:, xmask2), 2, "omitnan");
-% prof_Vl2     = mean(V_loess(:, xmask2), 2, "omitnan");
-prof_Vb2     = mean(V_bilateral(:, xmask2), 2, "omitnan");
-
-prof_dVc2    = mean(dVc_dy(:, xmask2), 2, "omitnan");
-prof_dVm2    = mean(dVm_dy(:, xmask2), 2, "omitnan");
-prof_dVg2    = mean(dVg_dy(:, xmask2), 2, "omitnan");
-% prof_dVl2    = mean(dVl_dy(:, xmask2), 2, "omitnan");
-prof_dVb2    = mean(dVb_dy(:, xmask2), 2, "omitnan");
-
-%% 可视化开始
-figure;
-
-set(groot, 'defaultAxesFontName', 'Calibri');
-set(groot, 'defaultTextFontName', 'Calibri');
-
-%%%% ========================
-%%%% 1. 第一行（Noisy）
-%%%% ========================
-
-%% ---- (1,1) Noisy velocity ----
+% Row 1: noisy velocity and noise-free strain rate
 subplot(4,6,1)
-hV1 = imagesc(X(1,:),Y(:,1),V_noisy,[-4 4]); axis image xy;
-set(gca,'Color',[0.7 0.7 0.7]);
-set(hV1,'AlphaData',~isnan(V_noisy));
-title("Synth Ve with noise");
-colormap(vik); colorbar;
-hold on;
-rectangle('Position',[-110,-200,20,400],'EdgeColor','b','LineWidth',1.5);
-rectangle('Position',[90,-200,20,400],'EdgeColor','r','LineWidth',1.5);
-rectangle('Position',[-150,50,101,101],'EdgeColor','g','LineWidth',1.5);
+map_plot(X, Y, V_noisy, [-4 4], vik);
+rectangle('Position', [-110,-200,20,400], 'EdgeColor', 'b', 'LineWidth', 1.5);
+rectangle('Position', [90,-200,20,400],  'EdgeColor', 'r', 'LineWidth', 1.5);
+rectangle('Position', [-150,50,101,101], 'EdgeColor', 'g', 'LineWidth', 1.5);   % filter window size
+title("Synthetic Ve with noise"); colorbar;
 
-%% ---- (1,2)(1,3) Profile ----
-% 准备采样点（灰色散点）
-Yvec = prof_y(:);  % Ny×1
+for p = 1:2
+    subplot(4,6,1+p)
+    Vpts = V_noisy(:, masks{p});
+    ypts = repmat(prof_y, 1, size(Vpts, 2));
+    ok = ~isnan(Vpts);
+    plot(ypts(ok), Vpts(ok), '.', 'Color', [0.6 0.6 0.6], 'MarkerSize', 4); hold on;
+    plot(prof_y, prof_Vc, 'k:', 'LineWidth', 1);
+    plot(prof_y, mean(V_noisy(:, masks{p}), 2, "omitnan"), colors{p}, 'LineWidth', 0.8);
+    profile_axes([-6 6]);
+    title(sprintf("Profile %d Ve (noisy)", p));
+end
 
-% profile 1 window: X in [-110,-90]
-Vpts1 = V_noisy(:, xmask1);                 % Ny×Nx1
-ypts1 = repmat(Yvec, 1, size(Vpts1,2));     % Ny×Nx1
-
-% profile 2 window: X in [90,110]
-Vpts2 = V_noisy(:, xmask2);                 % Ny×Nx2
-ypts2 = repmat(Yvec, 1, size(Vpts2,2));     % Ny×Nx2
-
-% ---- (1,2) ----
-subplot(4,6,2)
-
-% 灰色采样点（去掉NaN）
-m1 = ~isnan(Vpts1);
-plot(ypts1(m1), Vpts1(m1), '.', 'Color', [0.6 0.6 0.6], 'MarkerSize', 6); hold on;
-
-plot(prof_y, prof_Vc,'k:','LineWidth',1); hold on;
-
-% 均值曲线
-plot(prof_y, prof_Vn1,'b','LineWidth',0.6); grid on;
-title("Profile_3 Ve (noisy)");
-
-% ---- (1,3) ----
-subplot(4,6,3)
-
-m2 = ~isnan(Vpts2);
-plot(ypts2(m2), Vpts2(m2), '.', 'Color', [0.6 0.6 0.6], 'MarkerSize', 6); hold on;
-
-plot(prof_y, prof_Vc,'k:','LineWidth',1); hold on;
-
-plot(prof_y, prof_Vn2,'r','LineWidth',0.6); grid on;
-title("Profile_4 Ve (noisy)");
-
-
-%% ---- (1,4) Clean strain ----
 subplot(4,6,4)
-hS1 = imagesc(X(1,:),Y(:,1),dVc_dy,[-100 100]); axis image xy;
-set(gca,'Color',[0.7 0.7 0.7]);
-set(hS1,'AlphaData',~isnan(dVc_dy));
-title("∂Ve/∂y Synth (without noise)"); colormap(vik); colorbar;
-hold on;
-rectangle('Position',[-110,-200,20,400],'EdgeColor','b','LineWidth',1.5);
-rectangle('Position',[90,-200,20,400],'EdgeColor','r','LineWidth',1.5);
+map_plot(X, Y, dVc_dy, [-100 100], vik);
+rectangle('Position', [-110,-200,20,400], 'EdgeColor', 'b', 'LineWidth', 1.5);
+rectangle('Position', [90,-200,20,400],  'EdgeColor', 'r', 'LineWidth', 1.5);
+title("\partialVe/\partialy (noise-free)"); colorbar;
 
-%% ---- (1,5)(1,6) Profile ----
-subplot(4,6,5)
-plot(prof_y, prof_dVc1,'b'); grid on;
-title("Profile_3 ∂Ve/∂y Synth");
-ylim([0 100]);
-xlim([-100 100]);
+for p = 1:2
+    subplot(4,6,4+p)
+    plot(prof_y, prof_dVc{p}, colors{p}, 'LineWidth', 0.8);
+    profile_axes([0 100]);
+    title(sprintf("Profile %d \\partialVe/\\partialy (noise-free)", p));
+end
 
-subplot(4,6,6)
-plot(prof_y, prof_dVc2,'r'); grid on;
-title("Profile_4 ∂Ve/∂y Synth");
-ylim([0 100]);
-xlim([-100 100]);
-%%%% ========================
-%%%% 2. Median
-%%%% ========================
+% Rows 2-4: median, Gaussian and bilateral filtering
+row_titles = [sprintf("Median (%d\\times%d)", spatial_winsize, spatial_winsize), ...
+              sprintf("Gaussian (%d\\times%d, \\sigma_s=%d)", spatial_winsize, spatial_winsize, spatial_sigma), ...
+              sprintf("Bilateral (%d\\times%d, \\sigma_s=%d, \\sigma_v=%d)", spatial_winsize, spatial_winsize, spatial_sigma, velocity_sigma)];
 
-subplot(4,6,7)
-hV2 = imagesc(X(1,:),Y(:,1),V_median,[-4 4]); axis image xy;
-set(gca,'Color',[0.7 0.7 0.7]);
-set(hV2,'AlphaData',~isnan(V_median));
-title(sprintf("Median (%d×%d)",spatial_winsize,spatial_winsize));
+for m = 1:numel(methods)
+    name = methods(m);
+    base = 6*m;
 
-subplot(4,6,8)
-plot(prof_y, prof_Vc,'k:','LineWidth',1); hold on;
-plot(prof_y, prof_Vm1,'b'); grid on;
-title("Profile_3 Ve Median");
+    subplot(4,6,base+1)
+    map_plot(X, Y, V.(name), [-4 4], vik);
+    title(row_titles(m));
 
-subplot(4,6,9)
-plot(prof_y, prof_Vc,'k:','LineWidth',1); hold on;
-plot(prof_y, prof_Vm2,'r'); grid on;
-title("Profile_4 Ve Median");
+    for p = 1:2
+        subplot(4,6,base+1+p)
+        plot(prof_y, prof_Vc, 'k:', 'LineWidth', 1); hold on;
+        plot(prof_y, mean(V.(name)(:, masks{p}), 2, "omitnan"), colors{p}, 'LineWidth', 0.8);
+        profile_axes(vlim);
+        title(sprintf("Profile %d Ve %s", p, name));
+    end
 
-subplot(4,6,10)
-hS2 = imagesc(X(1,:),Y(:,1),dVm_dy,[-100 100]); axis image xy;
-set(gca,'Color',[0.7 0.7 0.7]);
-set(hS2,'AlphaData',~isnan(dVm_dy));
-title("∂Ve/∂y Median");
+    subplot(4,6,base+4)
+    map_plot(X, Y, dV.(name), [-100 100], vik);
+    title(sprintf("\\partialVe/\\partialy %s", name));
 
-subplot(4,6,11)
-plot(prof_y, prof_dVc1,'k:','LineWidth',1); hold on;
-plot(prof_y, prof_dVm1,'b'); grid on;
-title("Profile_3 ∂Ve/∂y Median");
-ylim([0 100]);
-xlim([-100 100]);
+    for p = 1:2
+        subplot(4,6,base+4+p)
+        plot(prof_y, prof_dVc{p}, 'k:', 'LineWidth', 1); hold on;
+        plot(prof_y, mean(dV.(name)(:, masks{p}), 2, "omitnan"), colors{p}, 'LineWidth', 0.8);
+        profile_axes([0 100]);
+        title(sprintf("Profile %d \\partialVe/\\partialy %s", p, name));
+    end
+end
 
-subplot(4,6,12)
-plot(prof_y, prof_dVc2,'k:','LineWidth',1); hold on;
-plot(prof_y, prof_dVm2,'r'); grid on;
-title("Profile_4 ∂Ve/∂y Median");
-ylim([0 100]);
-xlim([-100 100]);
-%%%% ========================
-%%%% 3. Gaussian
-%%%% ========================
+%% ---------- Local functions ----------
+function map_plot(X, Y, Z, clim, cmap)
+    h = imagesc(X(1,:), Y(:,1), Z, clim);
+    axis image xy;
+    set(gca, 'Color', [0.7 0.7 0.7]);   % NaN areas in gray
+    set(h, 'AlphaData', ~isnan(Z));
+    colormap(gca, cmap);
+    hold on;
+end
 
-subplot(4,6,13)
-hV3 = imagesc(X(1,:),Y(:,1),V_gaussian,[-4 4]); axis image xy;
-set(gca,'Color',[0.7 0.7 0.7]);
-set(hV3,'AlphaData',~isnan(V_gaussian));
-title(sprintf("Gaussian (%d×%d,σ_s=%d)",spatial_winsize,spatial_winsize,spatial_sigma));
-
-subplot(4,6,14)
-plot(prof_y, prof_Vc,'k:','LineWidth',1); hold on;
-plot(prof_y, prof_Vg1,'b'); grid on;
-title("Profile_3 Ve Gaussian");
-
-subplot(4,6,15)
-plot(prof_y, prof_Vc,'k:','LineWidth',1); hold on;
-plot(prof_y, prof_Vg2,'r'); grid on;
-title("Profile_4 Ve Gaussian");
-
-subplot(4,6,16)
-hS3 = imagesc(X(1,:),Y(:,1),dVg_dy,[-100 100]); axis image xy;
-set(gca,'Color',[0.7 0.7 0.7]);
-set(hS3,'AlphaData',~isnan(dVg_dy));
-title("∂Ve/∂y Gaussian");
-
-subplot(4,6,17)
-plot(prof_y, prof_dVc1,'k:','LineWidth',1); hold on;
-plot(prof_y, prof_dVg1,'b'); grid on;
-title("Profile_3 ∂Ve/∂y Gaussian");
-ylim([0 100]);
-xlim([-100 100]);
-
-subplot(4,6,18)
-plot(prof_y, prof_dVc2,'k:','LineWidth',1); hold on;
-plot(prof_y, prof_dVg2,'r'); grid on;
-title("Profile_4 ∂Ve/∂y Gaussian");
-ylim([0 100]);
-xlim([-100 100]);
-%%%% ========================
-%%%% 4. Bilateral
-%%%% ========================
-
-subplot(4,6,19)
-hV5 = imagesc(X(1,:),Y(:,1),V_bilateral,[-4 4]); axis image xy;
-set(gca,'Color',[0.7 0.7 0.7]);
-set(hV5,'AlphaData',~isnan(V_bilateral));
-title(sprintf("Bilateral (%d×%d,σ_s=%d,σ_v=%d)",...
-       spatial_winsize,spatial_winsize,spatial_sigma,range_sigma));
-
-subplot(4,6,20)
-plot(prof_y, prof_Vc,'k:','LineWidth',1); hold on;
-plot(prof_y, prof_Vb1,'b'); grid on;
-title("Profile_3 Ve Bilateral");
-
-subplot(4,6,21)
-plot(prof_y, prof_Vc,'k:','LineWidth',1); hold on;
-plot(prof_y, prof_Vb2,'r'); grid on;
-title("Profile_4 Ve Bilateral");
-
-subplot(4,6,22)
-hS5 = imagesc(X(1,:),Y(:,1),dVb_dy,[-100 100]); axis image xy;
-set(gca,'Color',[0.7 0.7 0.7]);
-set(hS5,'AlphaData',~isnan(dVb_dy));
-title("∂Ve/∂y Bilateral");
-
-subplot(4,6,23)
-plot(prof_y, prof_dVc1,'k:','LineWidth',1); hold on;
-plot(prof_y, prof_dVb1,'b'); grid on;
-title("Profile_3 ∂Ve/∂y Bilateral");
-ylim([0 100]);
-xlim([-100 100]);
-
-subplot(4,6,24)
-plot(prof_y, prof_dVc2,'k:','LineWidth',1); hold on;
-plot(prof_y, prof_dVb2,'r'); grid on;
-title("Profile_4 ∂Ve/∂y Bilateral");
-ylim([0 100]);
-xlim([-100 100]);
+function profile_axes(ylims)
+    grid on;
+    xlim([-200 200]);
+    ylim(ylims);
+    xlabel('y (km)');
+end

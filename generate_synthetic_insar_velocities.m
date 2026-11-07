@@ -1,296 +1,160 @@
 function [V_clean, V_noisy, X, Y, nan_mask] = generate_synthetic_insar_velocities( ...
     slip_rate, locking_depth_km, creep_rate, creep_depth_km, white_noise_std, ...
     correlated_noise_std, grid_extent_km, grid_res_km, fault_type, fault_params, nan_type, nan_params)
-
-% GENERATE_SYNTHETIC_INSAR_VELOCITIES
-% Generates synthetic fault-parallel InSAR velocity fields for a 2-D
-% strike-slip fault represented by a screw dislocation model, with optional
-% shallow creep, additive white noise, spatially correlated noise, and
-% flexible NaN masking schemes.
+%GENERATE_SYNTHETIC_INSAR_VELOCITIES  Synthetic fault-parallel velocity field with noise and data gaps.
 %
-% The function is designed for testing filtering, strain-rate estimation,
-% and inversion sensitivity under realistic noise and data-gap conditions.
+%   [V_clean, V_noisy, X, Y, nan_mask] = generate_synthetic_insar_velocities( ...
+%       slip_rate, locking_depth_km, creep_rate, creep_depth_km, ...
+%       white_noise_std, correlated_noise_std, grid_extent_km, grid_res_km, ...
+%       fault_type, fault_params, nan_type, nan_params)
 %
-% ----------------------------
-% INPUTS
-% ----------------------------
-% slip_rate               - Deep fault slip rate (mm/yr), e.g. 5
-% locking_depth_km        - Locking depth of the fault (km), e.g. 20
-% creep_rate              - Shallow creep rate (mm/yr), e.g. 1
-% creep_depth_km          - Depth extent of shallow creep (km),
-%                           e.g. 5 means creep occurs from 0–5 km depth
-% white_noise_std         - Standard deviation of Gaussian white noise (mm/yr)
-% correlated_noise_std    - Standard deviation of spatially correlated noise
-%                           (mm/yr)
-% grid_extent_km          - Spatial extent of the grid [xmin xmax ymin ymax]
-%                           in km, e.g. [-100 100 -50 50]
-% grid_res_km             - Grid resolution in km, e.g. 1
+%   Generates the east-west (fault-parallel) velocity of an east-west
+%   strike-slip fault from a 2D screw dislocation model (Equation 7), with
+%   optional shallow creep modeled by the back-slip approach (Equation 8):
 %
-% nan_type                - Type of NaN mask to apply:
-%                             'none'        : no NaNs
-%                             'blocks'      : rectangular NaN blocks
-%                             'distributed' : randomly distributed NaNs with
-%                                              different densities across
-%                                              the fault (y = 0)
-%                             'both'        : distributed + blocks
+%       Ve(y) = S/pi * atan(y/D1) - C * [ 1/pi * atan(y/D2) - H(y) ],
 %
-% nan_params              - nan_params.do_plot        : true/false(default: false)
-%                           
-%                           Structure containing NaN parameters, depending
-%                           on nan_type:
+%   where y is the fault-perpendicular distance, S the slip rate, D1 the
+%   locking depth, C the shallow creep rate, D2 the creeping depth and H the
+%   Heaviside function. Gaussian white noise and spatially correlated noise
+%   with a Lorentzian power spectrum (Lc = 500 km) are added (Supporting
+%   Information Text S1), and NaN regions can be imposed to mimic data gaps.
 %
-%                           For nan_type = 'blocks' or 'both':
-%                             nan_params.blocks = {
-%                                 {r1,r2,c1,c2}, ...
-%                                 {r1b,r2b,c1b,c2b}, ...
-%                             };
+%   INPUTS
+%     slip_rate            - slip rate below the locking depth, S (mm/yr), e.g. 5
+%     locking_depth_km     - locking depth, D1 (km), e.g. 20
+%     creep_rate           - shallow creep rate, C (mm/yr), e.g. 0 or 2
+%     creep_depth_km       - depth extent of shallow creep, D2 (km), e.g. 5
+%     white_noise_std      - standard deviation of Gaussian white noise (mm/yr), e.g. 1
+%     correlated_noise_std - standard deviation of correlated noise (mm/yr), e.g. 0.4
+%     grid_extent_km       - grid extent [xmin xmax ymin ymax] (km), e.g. [-200 200 -200 200]
+%     grid_res_km          - grid spacing (km), e.g. 1
+%     fault_type           - 'straight' (default): fault along y = y0
+%                            'step'            : fault at y = y_left for x < x0
+%                                                and at y = y_right for x >= x0
+%     fault_params         - structure with optional fields
+%                              y0_km      (straight; default 0)
+%                              x0_km      (step; default 0)
+%                              y_left_km  (step; default -50)
+%                              y_right_km (step; default 50)
+%     nan_type             - 'none' (default), 'blocks', 'distributed', or
+%                            'both' (distributed + blocks)
+%     nan_params           - structure with optional fields
+%                              do_plot  : true/false (default false), plot the
+%                                         velocities, noise and NaN mask
+%                              For 'blocks' / 'both':
+%                                blocks : cell array of {r1, r2, c1, c2}
+%                                         (row and column index ranges), e.g.
+%                                         {{220, 260, 260, 340}}
+%                              For 'distributed' / 'both', either
+%                                A) bbox mode:
+%                                   bbox_km : [xmin xmax ymin ymax] (km)
+%                                   p_in    : NaN fraction inside the box (default 0.30)
+%                                   p_out   : NaN fraction outside the box (default 0.05)
+%                                B) split mode (used when bbox_km is absent):
+%                                   y_split_km    : dividing line y = y_split (default 0)
+%                                   p_above       : NaN fraction for y > y_split (default 0.40)
+%                                   p_below       : NaN fraction for y < y_split (default 0.10)
+%                                   include_split : assign y == y_split to the
+%                                                   upper side (default false)
+%                                seed             : random seed (default 2026)
+%                                respect_existing : do not count pixels that are
+%                                                   already NaN (default true)
 %
-%                           For nan_type = 'distributed' or 'both':
+%   OUTPUTS
+%     V_clean  - noise-free velocity (mm/yr), NaN in the masked pixels
+%     V_noisy  - noisy velocity (mm/yr), NaN in the masked pixels
+%     X, Y     - coordinate grids (km)
+%     nan_mask - logical mask of the NaN pixels
 %
-%   A) bbox 模式：若提供 nan_params.bbox_km = [xmin xmax ymin ymax]
-%      则 bbox 内 NaN 比例  nan_params.p_in，bbox 外 nan_params.p_out
-%   B) split 模式：否则使用 y_split_km，将 Y>y_split_km 与 Y<y_split_km 赋不同 NaN 比例
-%      (p_above / p_below)
-%                             nan_params.y_split_km = 20;    % 分界线 y = 20 km
-%                             nan_params.p_above    = 0.40;  % y > 20 的 NaN 比例
-%                             nan_params.p_below    = 0.10;  % y < 20 的 NaN 比例
-%                             nan_params.include_split = false; % y==20 是否归到 above
-
-%                             nan_params.seed           : RNG seed                          
-%                             nan_params.respect_existing : avoid overwriting
-%                                                           existing NaNs
+%   The noise is reproducible: the white noise uses rng(42) and the
+%   correlated noise uses rng(38).
 %
-% ----------------------------
-% OUTPUTS
-% ----------------------------
-% V_clean                 - Clean synthetic velocity field (mm/yr)
-% V_noisy                 - Noisy velocity field with NaNs applied (mm/yr)
-% X, Y                    - Coordinate grids in km
-% nan_mask                - Logical mask indicating NaN locations
+%   EXAMPLES
+%     % Figure 2a: block data gap, no creep
+%     nan_params.blocks = {{220, 260, 260, 340}};
+%     [Vc, Vn, X, Y] = generate_synthetic_insar_velocities(5, 20, 0, 5, 1, 0.4, ...
+%         [-200 200 -200 200], 1, 'straight', struct(), 'blocks', nan_params);
 %
-% ----------------------------
-% EXAMPLES
-% ----------------------------
-% Example 1: Distributed NaNs with asymmetric density across the fault
+%     % Figure S4a: 40% of pixels removed within x = 0-200 km, y = 15-200 km
+%     nan_params = struct('bbox_km', [0 200 15 200], 'p_in', 0.40, 'p_out', 0);
+%     [Vc, Vn, X, Y] = generate_synthetic_insar_velocities(5, 20, 0, 5, 1, 0.4, ...
+%         [-200 200 -200 200], 1, 'straight', struct(), 'distributed', nan_params);
 %
-% nan_type = 'distributed';
-% nan_params.y_split_km = 0;    % 分界线 y = 0 km
-% nan_params.p_above    = 0.40;  % y > 0 的 NaN 比例
-% nan_params.p_below    = 0.10;  % y < 0 的 NaN 比例
-% nan_params.seed  = 42;
+%     % Figure S5a: fault step
+%     fp = struct('x0_km', 0, 'y_left_km', -50, 'y_right_km', 50);
+%     [Vc, Vn, X, Y] = generate_synthetic_insar_velocities(5, 20, 0, 5, 1, 0.4, ...
+%         [-200 200 -200 200], 1, 'step', fp, 'none', struct());
 %
-% [V_clean, V_noisy, X, Y] = generate_synthetic_insar_velocities( ...
-%     5, 20, 1, 5, 1, 1, [-100 100 -50 50], 1, nan_type, nan_params);
-%
-%
-% Example 2: Distributed NaNs + rectangular NaN gaps
-%
-% nan_type = 'both';
-% nan_params.y_split_km = 20;    % 分界线 y = 20 km
-% nan_params.p_above    = 0.40;  % y > 20 的 NaN 比例
-% nan_params.p_below    = 0.10;  % y < 20 的 NaN 比例
-% nan_params.blocks = { {10,30,20,40}, {60,80,100,140} };
-% 
-% [V_clean, V_noisy] = generate_synthetic_insar_velocities( ...
-%     5, 20, 1, 5, 1, 1, [-100 100 -50 50], 1, nan_type, nan_params);
-%
-% 
-% Example 3: Distributed NaNs + rectangular NaN gaps
-%
-% fault_type = "step";
-% fault_params.x0_km = 0;
-% fault_params.y_left_km  = -50;
-% fault_params.y_right_km =  50;
-% 
-% nan_type = "distributed";
-% nan_params.bbox_km = [-50 50 -20 20];
-% nan_params.p_in = 0.4;
-% nan_params.p_out = 0.1;
-% 
-% [V_clean, V_noisy, X, Y] = generate_synthetic_insar_velocities( ...
-%     5, 20, 0, 5, 1, 0.2, [-200 200 -200 200], 1, fault_type, fault_params, nan_type, nan_params);
-% ----------------------------
-% NOTES
-% ----------------------------
-% - The fault is assumed to lie at y = 0, with positive/negative y defining
-%   the two sides of the fault.
-% - All random processes are reproducible via explicit RNG seeds.
-% - This function is suitable for synthetic tests of filtering, strain-rate
-%   recovery, and slip-deficit inversion.
+%   See also GENERATE_CORRELATED_NOISE_FFT_LC.
 
     %% ---------- 0. Defaults ----------
-    
-    % ---- fault geometry defaults ----
     if nargin < 9 || isempty(fault_type)
-        fault_type = 'straight';   % 默认：直线断层
+        fault_type = 'straight';
     end
-    
     if nargin < 10 || isempty(fault_params)
         fault_params = struct();
     end
-    
-    % ---- NaN defaults ----
     if nargin < 11 || isempty(nan_type)
-        nan_type = 'none';         % 默认：不加 NaN
+        nan_type = 'none';
     end
-    
     if nargin < 12 || isempty(nan_params)
         nan_params = struct();
     end
+
+    % Correlation length scale of the correlated noise (km), Text S1
+    Lc_km = 500;
 
     %% ---------- 1. Grid ----------
     x_vec = grid_extent_km(1):grid_res_km:grid_extent_km(2);
     y_vec = grid_extent_km(3):grid_res_km:grid_extent_km(4);
     [X, Y] = meshgrid(x_vec, y_vec);
-    Y_m = Y * 1000;
 
-    %% ---------- 2. Dislocation + creep ----------
-    d1 = locking_depth_km * 1000;
-    d2 = creep_depth_km   * 1000;
+    %% ---------- 2. Screw dislocation with optional shallow creep ----------
+    d1 = locking_depth_km * 1000;   % m
+    d2 = creep_depth_km   * 1000;   % m
+    s  = slip_rate;
+    C  = creep_rate;
 
-    s = slip_rate;
-    C = creep_rate;
-
-    % ---------- fault geometry: y_fault(X) in km ----------
+    % Fault trace y_fault(x) (km)
     fault_type = lower(string(fault_type));
-
     switch fault_type
         case "straight"
-            % default: fault at y = y0 (km), default 0
-            y0 = getfieldwithdefault(fault_params,'y0_km',0);
+            y0 = getfieldwithdefault(fault_params, 'y0_km', 0);
             y_fault_km = y0 * ones(size(X));
-
         case "step"
-            % step fault:
-            % X < x0  -> y = y_left
-            % X >= x0 -> y = y_right
-            x0     = getfieldwithdefault(fault_params,'x0_km',0);
-            y_left = getfieldwithdefault(fault_params,'y_left_km',-50);
-            y_right= getfieldwithdefault(fault_params,'y_right_km', 50);
-
+            x0      = getfieldwithdefault(fault_params, 'x0_km', 0);
+            y_left  = getfieldwithdefault(fault_params, 'y_left_km', -50);
+            y_right = getfieldwithdefault(fault_params, 'y_right_km', 50);
             y_fault_km = y_left * ones(size(X));
             y_fault_km(X >= x0) = y_right;
-
         otherwise
             error("Unknown fault_type: %s. Use 'straight' or 'step'.", fault_type);
     end
 
-    % signed perpendicular distance to the fault (meters)
-    x_perp = (Y - y_fault_km) * 1000;
+    % Signed fault-perpendicular distance (m) and Heaviside function
+    y_perp = (Y - y_fault_km) * 1000;
+    H = double(y_perp >= 0);
 
-    % Heaviside for creep term
-    H = double(x_perp >= 0);
+    V_clean = (s/pi) * atan2(y_perp, d1) ...
+              - C * ( (1/pi) * atan2(y_perp, d2) - H );
 
-    V_clean =  (s/pi) * atan2(x_perp, d1) ...
-              - C * ( (1/pi) * atan2(x_perp, d2) - H );
-
-    %% ---------- 3. Noise ----------
+    %% ---------- 3. Noise (Text S1, Equation S1) ----------
     rng(42);
     white_noise = white_noise_std * randn(size(V_clean));
 
     rng(38);
-    noise_corr_1 = generate_correlated_noise_fft_Lc(X, Y, 30,  correlated_noise_std);
-    rng(35);
-    noise_corr_2 = generate_correlated_noise_fft_Lc(X, Y, 100, correlated_noise_std);
+    corr_noise = generate_correlated_noise_fft_Lc(X, Y, Lc_km, correlated_noise_std);
 
-    V_noisy = V_clean + white_noise + noise_corr_1 + noise_corr_2;
+    V_noisy = V_clean + white_noise + corr_noise;
 
     %% ---------- 4. NaN mask ----------
     nan_mask = false(size(V_clean));
     nan_type = lower(string(nan_type));
 
-    % -------- blocks --------
-    function apply_blocks()
-        if ~isfield(nan_params,'blocks') || isempty(nan_params.blocks)
-            return;
-        end
-        blocks = nan_params.blocks;
-        if numel(blocks) == 4 && ~iscell(blocks{1})
-            blocks = {blocks};
-        end
-        for k = 1:numel(blocks)
-            b = blocks{k};
-            nan_mask(b{1}:b{2}, b{3}:b{4}) = true;
-        end
-    end
-
-% -------- distributed (UPDATED) --------
-% 支持两种 distributed 模式（自动判别）：
-%   A) bbox 模式：若提供 nan_params.bbox_km = [xmin xmax ymin ymax]
-%      则 bbox 内 NaN 比例 = p_in，bbox 外 = p_out
-%   B) split 模式：否则使用 y_split_km，将 Y>y0 与 Y<y0 赋不同 NaN 比例
-%      (p_above / p_below)
-
-function apply_distributed()
-
-    % ---------- common defaults ----------
-    seed = getfieldwithdefault(nan_params,'seed',2026);
-    respect_existing = getfieldwithdefault(nan_params,'respect_existing',true);
-    rng(seed);
-
-    % ---------- Mode A: bbox in/out ----------
-    if isfield(nan_params,'bbox_km') && ~isempty(nan_params.bbox_km)
-
-        bbox = nan_params.bbox_km;  % [xmin xmax ymin ymax] in km
-        if numel(bbox) ~= 4
-            error('nan_params.bbox_km must be a 1x4 vector: [xmin xmax ymin ymax] (km).');
-        end
-        xmin = bbox(1); xmax = bbox(2);
-        ymin = bbox(3); ymax = bbox(4);
-
-        p_in  = getfieldwithdefault(nan_params,'p_in', 0.30);
-        p_out = getfieldwithdefault(nan_params,'p_out',0.05);
-
-        if p_in < 0 || p_in > 1 || p_out < 0 || p_out > 1
-            error('distributed NaN fractions (p_in/p_out) must be within [0,1].');
-        end
-
-        mask_in  = (X >= xmin) & (X <= xmax) & (Y >= ymin) & (Y <= ymax);
-        mask_out = ~mask_in;
-
-        if respect_existing
-            valid = ~nan_mask & ~isnan(V_noisy);
-            mask_in  = mask_in  & valid;
-            mask_out = mask_out & valid;
-        end
-
-        u = rand(size(V_clean));
-        nan_mask = nan_mask | (mask_in  & (u < p_in)) | (mask_out & (u < p_out));
-
-    % ---------- Mode B: y-split above/below ----------
-    else
-        y0 = getfieldwithdefault(nan_params,'y_split_km',0);      % km
-        pA = getfieldwithdefault(nan_params,'p_above',0.40);      % Y > y0
-        pB = getfieldwithdefault(nan_params,'p_below',0.10);      % Y < y0
-        include_split = getfieldwithdefault(nan_params,'include_split',false);
-
-        if pA < 0 || pA > 1 || pB < 0 || pB > 1
-            error('distributed NaN fractions (p_above/p_below) must be within [0,1].');
-        end
-
-        if include_split
-            mask_above = (Y >= y0);
-            mask_below = (Y <  y0);
-        else
-            mask_above = (Y >  y0);
-            mask_below = (Y <  y0);
-        end
-
-        if respect_existing
-            valid = ~nan_mask & ~isnan(V_noisy);
-            mask_above = mask_above & valid;
-            mask_below = mask_below & valid;
-        end
-
-        u = rand(size(V_clean));
-        nan_mask = nan_mask | (mask_above & (u < pA)) | (mask_below & (u < pB));
-    end
-end
-
-% -------- apply by type --------
     switch nan_type
         case "none"
-            % nothing
+            % no data gaps
         case "blocks"
             apply_blocks();
         case "distributed"
@@ -299,108 +163,110 @@ end
             apply_distributed();
             apply_blocks();
         otherwise
-            error("Unknown nan_type: %s", nan_type);
+            error("Unknown nan_type: %s. Use 'none', 'blocks', 'distributed', or 'both'.", nan_type);
     end
 
-    %% ---------- 5. Apply ----------
     V_clean(nan_mask) = NaN;
     V_noisy(nan_mask) = NaN;
 
-    %% ---------- 6. Optional plotting ----------
-    % Controlled by nan_params.do_plot (default: false)
-
-    do_plot = false;
-    if isfield(nan_params,'do_plot')
-        do_plot = nan_params.do_plot;
-    end
-
-    if do_plot
-
-        % ---- load colormap (vik) if available ----
-        if exist('vik.mat','file')
-            vik = importdata('vik.mat');
-            cmap = vik;
+    %% ---------- 5. Optional plot ----------
+    if getfieldwithdefault(nan_params, 'do_plot', false)
+        if exist('vik.mat', 'file')
+            cmap = importdata('vik.mat');
         else
-            warning('vik.mat not found, using parula instead.');
             cmap = parula;
         end
 
-        figure('Color','w','Position',[100 100 1200 700]);
+        figure('Color', 'w', 'Position', [100 100 1200 700]);
+        panels = {V_clean,     [-5 5], 'Noise-free velocity (mm/yr)';
+                  V_noisy,     [-5 5], 'Noisy velocity with NaNs (mm/yr)';
+                  white_noise, [-3 3], sprintf('White noise (%.2f mm/yr)', white_noise_std);
+                  corr_noise,  [-1 1], sprintf('Correlated noise (%.2f mm/yr, L_c = %d km)', correlated_noise_std, Lc_km);
+                  white_noise + corr_noise, [-3 3], 'Total noise (mm/yr)';
+                  double(nan_mask), [0 1], 'NaN mask'};
+        for k = 1:size(panels, 1)
+            subplot(2, 3, k);
+            h = imagesc(x_vec, y_vec, panels{k, 1}, panels{k, 2});
+            axis image xy;
+            colormap(gca, cmap);
+            set(h, 'AlphaData', ~isnan(panels{k, 1}));
+            colorbar;
+            title(panels{k, 3}, 'FontWeight', 'normal');
+        end
+        sgtitle('Synthetic velocity field, noise components and NaN mask');
+    end
 
-        % ---------- Clean velocity ----------
-        subplot(2,3,1);
-        h1 = imagesc(x_vec, y_vec, V_clean, [-5 5]);
-        axis image xy;
-        colormap(gca, cmap);
-        set(gca,'Color',[1 1 1]);
-        set(h1,'AlphaData',~isnan(V_clean));
-        colorbar;
-        title('Clean velocity (lock + creep)','FontWeight','normal');
+    %% ---------- Nested functions ----------
+    function apply_blocks()
+        % Rectangular NaN blocks given by row/column index ranges
+        if ~isfield(nan_params, 'blocks') || isempty(nan_params.blocks)
+            return;
+        end
+        blocks = nan_params.blocks;
+        if numel(blocks) == 4 && ~iscell(blocks{1})
+            blocks = {blocks};
+        end
+        for kb = 1:numel(blocks)
+            b = blocks{kb};
+            nan_mask(b{1}:b{2}, b{3}:b{4}) = true;
+        end
+    end
 
-        % ---------- Noisy velocity ----------
-        subplot(2,3,2);
-        h2 = imagesc(x_vec, y_vec, V_noisy, [-5 5]);
-        axis image xy;
-        colormap(gca, cmap);
-        set(gca,'Color',[1 1 1]);
-        set(h2,'AlphaData',~isnan(V_noisy));
-        colorbar;
-        title('Noisy velocity + NaNs','FontWeight','normal');
+    function apply_distributed()
+        % Randomly distributed NaNs with different densities
+        rng(getfieldwithdefault(nan_params, 'seed', 2026));
+        respect_existing = getfieldwithdefault(nan_params, 'respect_existing', true);
 
-        % ---------- White noise ----------
-        subplot(2,3,3);
-        h3 = imagesc(x_vec, y_vec, white_noise, [-3 3]);
-        axis image xy;
-        colormap(gca, cmap);
-        set(gca,'Color',[1 1 1]);
-        set(h3,'AlphaData',~isnan(white_noise));
-        colorbar;
-        title(sprintf('White noise (%.2f mm/yr)',white_noise_std), ...
-              'FontWeight','normal');
+        if isfield(nan_params, 'bbox_km') && ~isempty(nan_params.bbox_km)
+            % Mode A: NaN fraction p_in inside the box and p_out outside it
+            bbox = nan_params.bbox_km;
+            if numel(bbox) ~= 4
+                error('nan_params.bbox_km must be a 1x4 vector [xmin xmax ymin ymax] (km).');
+            end
+            p_in  = getfieldwithdefault(nan_params, 'p_in', 0.30);
+            p_out = getfieldwithdefault(nan_params, 'p_out', 0.05);
+            if p_in < 0 || p_in > 1 || p_out < 0 || p_out > 1
+                error('NaN fractions p_in and p_out must be within [0, 1].');
+            end
 
-        % ---------- Correlated noise (30 km) ----------
-        subplot(2,3,4);
-        h4 = imagesc(x_vec, y_vec, noise_corr_1, [-1 1]);
-        axis image xy;
-        colormap(gca, cmap);
-        set(gca,'Color',[1 1 1]);
-        set(h4,'AlphaData',~isnan(noise_corr_1));
-        colorbar;
-        title(sprintf('Correlated noise (L_c = 30 km)'), ...
-              'FontWeight','normal');
+            mask_a = (X >= bbox(1)) & (X <= bbox(2)) & (Y >= bbox(3)) & (Y <= bbox(4));
+            mask_b = ~mask_a;
+            p_a = p_in;
+            p_b = p_out;
+        else
+            % Mode B: NaN fraction p_above for y > y_split and p_below for y < y_split
+            y_split = getfieldwithdefault(nan_params, 'y_split_km', 0);
+            p_a = getfieldwithdefault(nan_params, 'p_above', 0.40);
+            p_b = getfieldwithdefault(nan_params, 'p_below', 0.10);
+            if p_a < 0 || p_a > 1 || p_b < 0 || p_b > 1
+                error('NaN fractions p_above and p_below must be within [0, 1].');
+            end
 
-        % ---------- Correlated noise (100 km) ----------
-        subplot(2,3,5);
-        h5 = imagesc(x_vec, y_vec, noise_corr_2, [-1 1]);
-        axis image xy;
-        colormap(gca, cmap);
-        set(gca,'Color',[1 1 1]);
-        set(h5,'AlphaData',~isnan(noise_corr_2));
-        colorbar;
-        title(sprintf('Correlated noise (L_c = 100 km)'), ...
-              'FontWeight','normal');
+            if getfieldwithdefault(nan_params, 'include_split', false)
+                mask_a = (Y >= y_split);
+            else
+                mask_a = (Y > y_split);
+            end
+            mask_b = (Y < y_split);
+        end
 
-        % ---------- Total noise ----------
-        subplot(2,3,6);
-        h6 = imagesc(x_vec, y_vec, white_noise + noise_corr_1 + noise_corr_2, [-3 3]);
-        axis image xy;
-        colormap(gca, cmap);
-        set(gca,'Color',[1 1 1]);
-        set(h6,'AlphaData',~isnan(V_noisy));
-        colorbar;
-        title('Total noise','FontWeight','normal');
+        if respect_existing
+            valid  = ~nan_mask & ~isnan(V_noisy);
+            mask_a = mask_a & valid;
+            mask_b = mask_b & valid;
+        end
 
-        sgtitle('Synthetic InSAR velocity & noise components','FontWeight','bold');
+        u = rand(size(V_clean));
+        nan_mask = nan_mask | (mask_a & (u < p_a)) | (mask_b & (u < p_b));
     end
 
 end
 
-%% ---------- utility ----------
+%% ---------- Utility ----------
 function v = getfieldwithdefault(s, f, d)
-    if isfield(s,f)
+    if isfield(s, f)
         v = s.(f);
     else
         v = d;
     end
 end
-
